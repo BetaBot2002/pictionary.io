@@ -6,7 +6,7 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v12';
+const SESSION_KEY = 'skribbl_p2p_session_v16';
 
 // --- Emergency Fallback List ---
 const FALLBACK_WORDS = ["apple", "elephant", "guitar", "sunflower", "mountain", "ocean", "bicycle", "pizza", "computer", "dragon", "castle", "wizard"];
@@ -41,7 +41,15 @@ export default function App() {
   const [players, setPlayers] = useState(initSession.players || []);
 
   // --- Game Settings (Host Only) ---
-  const [settings, setSettings] = useState(initSession.settings || { rounds: 3, drawTime: 60, customWords: '', useOnlyCustom: false });
+  const [settings, setSettings] = useState(initSession.settings || { 
+    maxPlayers: 8, 
+    drawTime: 80, 
+    rounds: 3, 
+    wordCount: 3, 
+    hints: 2, 
+    customWords: '', 
+    useOnlyCustom: false 
+  });
 
   // --- Game Loop State ---
   const [gameState, setGameState] = useState(initSession.gameState || 'menu'); 
@@ -118,7 +126,7 @@ export default function App() {
     }
   };
 
-  const getUnusedWords = async (count = 3) => {
+  const getUnusedWords = async (count) => {
     const state = stateRef.current;
     
     if (state.settings.useOnlyCustom) {
@@ -266,7 +274,7 @@ export default function App() {
         payload: { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, roomHostId }
       });
     }
-  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, isHost, roomHostId]);
+  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, isHost, roomHostId, settings]);
 
   useEffect(() => {
     let timer;
@@ -326,6 +334,10 @@ export default function App() {
         if (data.payload.isNewStroke && canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         break;
       case 'CLEAR_CANVAS': executeClear(); break;
+      case 'ROOM_FULL':
+        alert("The Host's room is currently full!");
+        handleLeaveRoom();
+        break;
       case 'ROOM_CLOSED': handleLeaveRoom(); break; 
       default: break;
     }
@@ -334,11 +346,19 @@ export default function App() {
   const handleHostReceiveData = (data, conn) => {
     switch (data.type) {
       case 'JOIN_LOBBY': {
-        const exists = stateRef.current.players.find(p => p.id === data.payload.id);
+        const state = stateRef.current;
+        const exists = state.players.find(p => p.id === data.payload.id);
+        const activeCount = state.players.filter(p => p.connected !== false).length;
+        
+        if (!exists && activeCount >= state.settings.maxPlayers) {
+           conn.send({ type: 'ROOM_FULL' });
+           return;
+        }
+
         const msgText = exists ? `${data.payload.name} reconnected!` : `${data.payload.name} joined the room!`;
         const sysMsg = { sender: 'System', text: msgText, system: true, variant: exists ? 'success' : 'default' };
         
-        const updatedChat = [...stateRef.current.chat, sysMsg];
+        const updatedChat = [...state.chat, sysMsg];
         setChat(updatedChat);
         broadcast({ type: 'CHAT', payload: sysMsg }, conn.peer);
 
@@ -347,8 +367,8 @@ export default function App() {
           return [...prev, { ...data.payload, peerId: conn.peer, score: 0, hasGuessed: false, connected: true }];
         });
         
-        if (stateRef.current.gameState !== 'menu') {
-          conn.send({ type: 'SYNC_STATE', payload: { ...stateRef.current, chat: updatedChat } });
+        if (state.gameState !== 'menu') {
+          conn.send({ type: 'SYNC_STATE', payload: { ...state, chat: updatedChat } });
         }
         break;
       }
@@ -402,7 +422,7 @@ export default function App() {
   // ==========================================
   const startGame = () => {
     const active = players.filter(p => p.connected !== false);
-    if (active.length < 2) return; 
+    if (active.length < 2 || active.length > settings.maxPlayers) return; 
     setPlayers(prev => prev.map(p => ({ ...p, score: 0, hasGuessed: false })));
     setCurrentRound(1);
     wordCache.current.forEach((_, key) => wordCache.current.set(key, false));
@@ -410,7 +430,8 @@ export default function App() {
   };
 
   const startTurn = async (nextDrawerId) => {
-    const active = stateRef.current.players.filter(p => p.connected !== false);
+    const state = stateRef.current;
+    const active = state.players.filter(p => p.connected !== false);
     if (active.length < 2) {
       setGameState('lobby');
       const sysMsg = { sender: 'System', text: 'Not enough players left. Returning to lobby.', system: true, variant: 'error' };
@@ -423,7 +444,7 @@ export default function App() {
     setDrawerId(nextDrawerId);
     setCurrentWord('');
     
-    const options = await getUnusedWords(3);
+    const options = await getUnusedWords(state.settings.wordCount);
     
     setGameState('word_select');
     setTimeLeft(15); 
@@ -431,7 +452,7 @@ export default function App() {
     if (nextDrawerId === myPlayerId) {
       setWordOptions(options);
     } else {
-      const drawerClient = connsRef.current.find(c => stateRef.current.players.find(p => p.id === nextDrawerId)?.peerId === c.peer);
+      const drawerClient = connsRef.current.find(c => state.players.find(p => p.id === nextDrawerId)?.peerId === c.peer);
       if (drawerClient && drawerClient.open) drawerClient.send({ type: 'WORD_OPTIONS', payload: options });
     }
   };
@@ -452,12 +473,24 @@ export default function App() {
     if (!player) return;
 
     if (state.gameState === 'drawing' && playerId !== state.drawerId && !player.hasGuessed && text.trim().toLowerCase() === state.currentWord.toLowerCase()) {
-      const points = Math.max(10, Math.floor((state.timeLeft / state.settings.drawTime) * 100));
+      
+      const allowedHints = state.settings.hints;
+      const maxPossibleHints = Math.floor(state.currentWord.length / 2);
+      const activeHints = Math.min(allowedHints, maxPossibleHints);
+      
+      const currentHintsRevealed = Math.floor((1 - (state.timeLeft / state.settings.drawTime)) * activeHints);
+      
+      let points = 300;
+      if (activeHints > 0) {
+        const penaltyPerHint = 300 / activeHints; 
+        points = Math.floor(300 - (currentHintsRevealed * penaltyPerHint));
+        points = Math.max(10, points); 
+      }
       
       setPlayers(prev => {
         const updated = prev.map(p => {
           if (p.id === playerId) return { ...p, score: p.score + points, hasGuessed: true };
-          if (p.id === state.drawerId) return { ...p, score: p.score + 15 }; 
+          if (p.id === state.drawerId) return { ...p, score: p.score + 50 }; 
           return p;
         });
 
@@ -468,7 +501,7 @@ export default function App() {
         return updated;
       });
 
-      const sysMsg = { sender: 'System', text: `${player.name} guessed the word!`, system: true, variant: 'success' };
+      const sysMsg = { sender: 'System', text: `${player.name} guessed the word! (+${points}pts)`, system: true, variant: 'success' };
       setChat(prev => [...prev, sysMsg]);
       broadcast({ type: 'CHAT', payload: sysMsg });
       return;
@@ -486,7 +519,7 @@ export default function App() {
     
     let endText = `Time's up! The word was ${state.currentWord}`;
     if (forcedSkip) endText = "Drawer disconnected. Turn skipped!";
-    else if (allGuessed) endText = `Everyone guessed it! The word was ${state.currentWord}`;
+    else if (allGuessed) endText = `The word was ${state.currentWord}`;
     
     const sysMsg = { sender: 'System', text: endText, system: true, variant: forcedSkip ? 'error' : (allGuessed ? 'success' : 'default') };
     setChat(prev => [...prev, sysMsg]);
@@ -617,7 +650,11 @@ export default function App() {
     if (!currentWord) return "";
     if (myPlayerId === drawerId || gameState === 'turn_end' || gameState === 'game_over') return currentWord;
     
-    const revealCount = Math.floor((1 - (timeLeft / settings.drawTime)) * (currentWord.length / 2));
+    const allowedHints = settings.hints;
+    const maxPossibleHints = Math.floor(currentWord.length / 2);
+    const activeHints = Math.min(allowedHints, maxPossibleHints);
+    
+    const revealCount = Math.floor((1 - (timeLeft / settings.drawTime)) * activeHints);
     return currentWord.split('').map((char, index) => 
       (char === ' ' ? '  ' : (index < revealCount ? char : '_'))
     ).join(' ');
@@ -682,12 +719,12 @@ export default function App() {
                 A round consists of <strong>every player taking one turn to draw</strong> while the others guess. The game ends when all rounds are completed.
               </li>
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🎯 Guessers</strong>
-                You earn more points the faster you type the correct word! Maximum points for instant guesses, scaling down as the timer drops.
+                <strong className="text-[#EEEEEE] block text-base mb-1">🎯 Guessers (Hint Tiers)</strong>
+                You earn points based on how many letters were hidden when you guessed! Guessing before any letters are revealed gives you <strong>300 points</strong>. For every hint revealed, your potential score drops proportionally.
               </li>
               <li>
                 <strong className="text-[#EEEEEE] block text-base mb-1">🖌️ The Drawer</strong>
-                You earn a bonus <strong>+15 points</strong> for <em>each</em> player who successfully guesses your drawing.
+                You earn a bonus <strong>+50 points</strong> for <em>each</em> player who successfully guesses your drawing.
               </li>
             </ul>
             <button onClick={() => setShowInfoModal(false)} className="mt-8 w-full bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold py-3 rounded-lg transition-colors cursor-pointer shadow">Got it!</button>
@@ -771,7 +808,7 @@ export default function App() {
           <div className="bg-[#393E46] p-8 rounded-2xl shadow-xl w-full max-w-4xl border border-[#222831] flex flex-col md:flex-row gap-8">
             <div className="flex-grow">
               <h2 className="text-2xl font-black mb-4 flex justify-between items-center text-[#EEEEEE]">
-                Lobby <span className="text-sm font-normal bg-[#222831] px-3 py-1 rounded-full text-[#EEEEEE]/80">{players.filter(p=>p.connected!==false).length} Players</span>
+                Lobby <span className="text-sm font-normal bg-[#222831] px-3 py-1 rounded-full text-[#EEEEEE]/80">{players.filter(p=>p.connected!==false).length} / {settings.maxPlayers} Players</span>
               </h2>
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 {players.map(p => (
@@ -789,12 +826,25 @@ export default function App() {
             {isHost ? (
               <div className="w-full md:w-80 bg-[#222831] p-6 rounded-xl border border-[#222831]">
                 <h3 className="font-bold mb-4 text-[#EEEEEE] uppercase tracking-wide text-sm">Room Settings</h3>
+                
+                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Max Players: {settings.maxPlayers}</label>
+                <input type="range" min="2" max="12" value={settings.maxPlayers} onChange={e => setSettings({...settings, maxPlayers: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
+
                 <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Rounds: {settings.rounds}</label>
                 <input type="range" min="1" max="10" value={settings.rounds} onChange={e => setSettings({...settings, rounds: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
+
                 <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Draw Time: {settings.drawTime}s</label>
                 <input type="range" min="30" max="180" step="10" value={settings.drawTime} onChange={e => setSettings({...settings, drawTime: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
+
+                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Word Count Options: {settings.wordCount}</label>
+                <input type="range" min="2" max="5" value={settings.wordCount} onChange={e => setSettings({...settings, wordCount: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
+
+                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Hints Allowed: {settings.hints}</label>
+                <input type="range" min="0" max="5" value={settings.hints} onChange={e => setSettings({...settings, hints: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
+
                 <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Custom Words</label>
-                <textarea rows="3" className="w-full p-2 border border-[#393E46] bg-[#393E46] text-[#EEEEEE] rounded-lg mb-2 text-sm outline-none focus:border-[#00ADB5] placeholder-[#EEEEEE]/40" value={settings.customWords} onChange={e => setSettings({...settings, customWords: e.target.value})} placeholder="dog, cat, laser..." />
+                <textarea rows="2" className="w-full p-2 border border-[#393E46] bg-[#393E46] text-[#EEEEEE] rounded-lg mb-2 text-sm outline-none focus:border-[#00ADB5] placeholder-[#EEEEEE]/40" value={settings.customWords} onChange={e => setSettings({...settings, customWords: e.target.value})} placeholder="dog, cat, laser..." />
+                
                 <label className="flex items-center gap-2 text-sm font-bold text-[#EEEEEE]/80 mb-6 cursor-pointer">
                   <input type="checkbox" checked={settings.useOnlyCustom} onChange={e => setSettings({...settings, useOnlyCustom: e.target.checked})} className="w-4 h-4 accent-[#00ADB5]" /> Use custom words exclusively
                 </label>
@@ -819,10 +869,10 @@ export default function App() {
 
                 <button 
                   onClick={startGame} 
-                  disabled={players.filter(p=>p.connected!==false).length < 2}
-                  className={`w-full font-black py-3 rounded-xl transition-all ${players.filter(p=>p.connected!==false).length < 2 ? 'bg-[#393E46] text-[#EEEEEE]/50 cursor-not-allowed' : 'bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] shadow-[0_4px_0_#007a80] active:translate-y-1 cursor-pointer'}`}
+                  disabled={players.filter(p=>p.connected!==false).length < 2 || players.filter(p=>p.connected!==false).length > settings.maxPlayers}
+                  className={`w-full font-black py-3 rounded-xl transition-all ${players.filter(p=>p.connected!==false).length < 2 || players.filter(p=>p.connected!==false).length > settings.maxPlayers ? 'bg-[#393E46] text-[#EEEEEE]/50 cursor-not-allowed' : 'bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] shadow-[0_4px_0_#007a80] active:translate-y-1 cursor-pointer'}`}
                 >
-                  {players.filter(p=>p.connected!==false).length < 2 ? 'Need 2+ Online' : 'Start Game'}
+                  {players.filter(p=>p.connected!==false).length < 2 ? 'Need 2+ Online' : players.filter(p=>p.connected!==false).length > settings.maxPlayers ? 'Room Over Capacity' : 'Start Game'}
                 </button>
               </div>
             ) : (
@@ -847,7 +897,7 @@ export default function App() {
                 <div className="font-black text-[#EEEEEE]/50 w-4 text-center">#{idx + 1}</div>
                 <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg shrink-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
                 <div className="flex flex-col overflow-hidden">
-                  <span className={`font-bold text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name}</span>
+                  <span className={`font-bold text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</span>
                   <span className={`text-xs ${p.id === drawerId ? 'text-[#00ADB5]' : 'text-[#EEEEEE]/70'}`}>{p.score} pts</span>
                 </div>
               </div>
