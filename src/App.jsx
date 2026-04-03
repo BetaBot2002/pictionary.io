@@ -6,7 +6,7 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v25'; 
+const SESSION_KEY = 'skribbl_p2p_session_v25';
 
 // --- Fixed Internal Canvas Resolution ---
 const CANVAS_WIDTH = 800;
@@ -352,19 +352,28 @@ export default function App() {
         setRoomHostId(data.payload.roomHostId);
         setChat(data.payload.chat);
         setFirstGuessTime(data.payload.firstGuessTime);
-        applyCanvasState(data.payload.savedCanvas);
+        
+        // GLITCH FIX: Only apply the network canvas state if it changed AND we are not the one drawing
+        if (data.payload.drawerId !== myPlayerId && data.payload.savedCanvas && data.payload.savedCanvas !== stateRef.current.savedCanvas) {
+            applyCanvasState(data.payload.savedCanvas);
+        }
         break;
       case 'WORD_OPTIONS': setWordOptions(data.payload); break;
       case 'CHAT': setChat(prev => [...prev, data.payload]); break;
       case 'DRAW': 
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
         executeDrawCommand(data.payload); 
         if (data.payload.isNewStroke && canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         break;
       case 'FILL':
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
         executeFillCommand(data.payload);
         if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         break;
-      case 'CLEAR_CANVAS': executeClear(); break;
+      case 'CLEAR_CANVAS': 
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
+        executeClear(); 
+        break;
       case 'ROOM_FULL':
         alert("The Host's room is currently full!");
         handleLeaveRoom();
@@ -406,16 +415,19 @@ export default function App() {
       case 'CHAT_MESSAGE': handleChat(data.payload.text, data.payload.playerId); break;
       case 'WORD_CHOSEN': hostWordChosen(data.payload); break;
       case 'DRAW':
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
         executeDrawCommand(data.payload);
         if (data.payload.isNewStroke && canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         broadcast({ type: 'DRAW', payload: data.payload }, conn.peer); 
         break;
       case 'FILL':
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
         executeFillCommand(data.payload);
         if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         broadcast({ type: 'FILL', payload: data.payload }, conn.peer);
         break;
       case 'CLEAR_CANVAS':
+        if (stateRef.current.drawerId === myPlayerId) return; // Prevent network echo
         executeClear();
         broadcast({ type: 'CLEAR_CANVAS' }, conn.peer);
         break;
@@ -464,7 +476,6 @@ export default function App() {
     setFirstGuessTime(null);
     wordCache.current.forEach((_, key) => wordCache.current.set(key, false));
     
-    // Transition to Round Start screen
     setGameState('round_start');
     setTimeout(() => {
       startTurn(active[0].id);
@@ -485,7 +496,7 @@ export default function App() {
     setPlayers(prev => prev.map(p => ({ ...p, hasGuessed: false })));
     setDrawerId(nextDrawerId);
     setCurrentWord('');
-    setFirstGuessTime(null); // Reset panic mode timer for the new round
+    setFirstGuessTime(null); 
     
     const options = await getUnusedWords(state.settings.wordCount);
     
@@ -558,7 +569,7 @@ export default function App() {
           return updated;
         });
 
-        // ONLY log that the user guessed it (no point display)
+        // ONLY log that the user guessed it
         const sysMsg = { sender: 'System', text: `${player.name} guessed it!`, system: true, variant: 'success' };
         setChat(prev => [...prev, sysMsg]);
         broadcast({ type: 'CHAT', payload: sysMsg });
@@ -668,8 +679,6 @@ export default function App() {
     };
 
     setupCanvas();
-    // We no longer need to redraw on window resize because the internal resolution is fixed!
-    // CSS handles the visual resizing natively.
   }, [gameState, savedCanvas]);
 
   const hexToRgba = (hex) => {
@@ -879,9 +888,9 @@ export default function App() {
     const others = sortedPlayers.slice(3);
 
     const podiumBlocks = [];
-    if (top3[1]) podiumBlocks.push({ ...top3[1], rank: 2, height: 'h-24 md:h-32', color: 'bg-[#94A3B8]' }); // Silver
-    if (top3[0]) podiumBlocks.push({ ...top3[0], rank: 1, height: 'h-32 md:h-48', color: 'bg-[#F59E0B]' }); // Gold
-    if (top3[2]) podiumBlocks.push({ ...top3[2], rank: 3, height: 'h-16 md:h-24', color: 'bg-[#D97706]' }); // Bronze
+    if (top3[1]) podiumBlocks.push({ ...top3[1], rank: 2, height: 'h-24 md:h-32', color: 'bg-[#94A3B8]' }); 
+    if (top3[0]) podiumBlocks.push({ ...top3[0], rank: 1, height: 'h-32 md:h-48', color: 'bg-[#F59E0B]' }); 
+    if (top3[2]) podiumBlocks.push({ ...top3[2], rank: 3, height: 'h-16 md:h-24', color: 'bg-[#D97706]' }); 
 
     return (
       <div className="flex flex-col items-center w-full max-w-2xl px-4">
@@ -1129,12 +1138,13 @@ export default function App() {
               <div className={`font-mono font-bold tracking-[0.3em] md:tracking-[0.5em] text-xl md:text-2xl uppercase ${gameState === 'turn_end' ? 'text-[#00ADB5]' : 'text-[#EEEEEE]'}`}>{renderHint()}</div>
             </div>
 
-            <div className="flex-grow relative bg-[#EEEEEE] w-full flex items-center justify-center overflow-hidden touch-none">
+            {/* NEW DARK CONTAINER FOR CANVAS FRAME */}
+            <div className="flex-grow relative bg-[#1a1e25] w-full flex items-center justify-center overflow-hidden touch-none p-2 md:p-6 shadow-inner border-b md:border-b-0 border-[#222831]">
               
-              {/* FIXED ASPECT RATIO CANVAS CONTAINER */}
+              {/* BEAUTIFULLY FRAMED CANVAS */}
               <canvas 
                 ref={canvasRef} 
-                className="w-full h-auto max-w-[800px] aspect-[4/3] bg-[#EEEEEE] touch-none shadow-md border-b md:border-b-0 border-[#222831]/20" 
+                className="w-full h-auto max-w-[800px] aspect-[4/3] bg-[#EEEEEE] touch-none shadow-[0_0_30px_rgba(0,0,0,0.5)] rounded-lg border-4 border-[#393E46]" 
                 onPointerDown={startDrawing} 
                 onPointerMove={draw} 
                 onPointerUp={stopDrawing} 
