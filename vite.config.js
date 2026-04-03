@@ -7,4 +7,5 @@ export default defineConfig({
     react(),
     tailwindcss(),
   ],
+  base: '/pictionary.io/', // Tells Vite to look in your specific repo folder
 })
