@@ -6,10 +6,29 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v19';
+const SESSION_KEY = 'skribbl_p2p_session_v25'; 
 
 // --- Emergency Fallback List ---
 const FALLBACK_WORDS = ["apple", "elephant", "guitar", "sunflower", "mountain", "ocean", "bicycle", "pizza", "computer", "dragon", "castle", "wizard"];
+
+// --- Levenshtein Distance (For "Close Guess" typo mechanic) ---
+const getLevenshteinDistance = (a, b) => {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+  for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1));
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+};
 
 export default function App() {
   // --- LocalStorage Initialization ---
@@ -46,7 +65,7 @@ export default function App() {
     drawTime: 80, 
     rounds: 3, 
     wordCount: 3, 
-    hints: 2, 
+    hints: 5,  
     customWords: '', 
     useOnlyCustom: false 
   });
@@ -58,6 +77,7 @@ export default function App() {
   const [wordOptions, setWordOptions] = useState([]);
   const [currentWord, setCurrentWord] = useState(initSession.currentWord || '');
   const [timeLeft, setTimeLeft] = useState(initSession.timeLeft || 0);
+  const [firstGuessTime, setFirstGuessTime] = useState(initSession.firstGuessTime || null);
 
   // --- UI & Canvas State ---
   const [chat, setChat] = useState(initSession.chat || []);
@@ -69,20 +89,20 @@ export default function App() {
   const canvasRef = useRef(null);
   const contextRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
-  const [activeTool, setActiveTool] = useState('brush'); // 'brush' or 'fill'
+  const [activeTool, setActiveTool] = useState('brush');
   const [brushColor, setBrushColor] = useState('#000000');
   const [brushSize, setBrushSize] = useState(5);
 
   // ==========================================
   // STALE CLOSURE & PERSISTENCE
   // ==========================================
-  const stateRef = useRef({ gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost });
+  const stateRef = useRef({ gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost, firstGuessTime });
   const connsRef = useRef(connections);
   const peerRef = useRef(peer);
 
   useEffect(() => {
-    stateRef.current = { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost };
-  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost]);
+    stateRef.current = { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost, firstGuessTime };
+  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, isHost, firstGuessTime]);
 
   useEffect(() => { connsRef.current = connections; }, [connections]);
   useEffect(() => { peerRef.current = peer; }, [peer]);
@@ -90,10 +110,10 @@ export default function App() {
   useEffect(() => {
     const sessionToSave = {
       myPlayerId, me, myPeerId, joinId, isHost, players, settings, roomHostId,
-      gameState, currentRound, drawerId, currentWord, timeLeft, chat, savedCanvas
+      gameState, currentRound, drawerId, currentWord, timeLeft, chat, savedCanvas, firstGuessTime
     };
     localStorage.setItem(SESSION_KEY, JSON.stringify(sessionToSave));
-  }, [myPlayerId, me, myPeerId, joinId, isHost, players, settings, roomHostId, gameState, currentRound, drawerId, currentWord, timeLeft, chat, savedCanvas]);
+  }, [myPlayerId, me, myPeerId, joinId, isHost, players, settings, roomHostId, gameState, currentRound, drawerId, currentWord, timeLeft, chat, savedCanvas, firstGuessTime]);
 
   const handleLeaveRoom = () => {
     localStorage.removeItem(SESSION_KEY);
@@ -272,10 +292,10 @@ export default function App() {
     if (isHost && gameState !== 'menu') {
       broadcast({
         type: 'SYNC_STATE',
-        payload: { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId }
+        payload: { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId, firstGuessTime }
       });
     }
-  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, isHost, roomHostId, settings]);
+  }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, isHost, roomHostId, settings, firstGuessTime]);
 
   useEffect(() => {
     let timer;
@@ -327,6 +347,7 @@ export default function App() {
         setSettings(data.payload.settings);
         setRoomHostId(data.payload.roomHostId);
         setChat(data.payload.chat);
+        setFirstGuessTime(data.payload.firstGuessTime);
         applyCanvasState(data.payload.savedCanvas);
         break;
       case 'WORD_OPTIONS': setWordOptions(data.payload); break;
@@ -436,8 +457,14 @@ export default function App() {
     if (active.length < 2 || active.length > settings.maxPlayers) return; 
     setPlayers(prev => prev.map(p => ({ ...p, score: 0, hasGuessed: false })));
     setCurrentRound(1);
+    setFirstGuessTime(null);
     wordCache.current.forEach((_, key) => wordCache.current.set(key, false));
-    startTurn(active[0].id);
+    
+    // Transition to Round Start screen
+    setGameState('round_start');
+    setTimeout(() => {
+      startTurn(active[0].id);
+    }, 3000);
   };
 
   const startTurn = async (nextDrawerId) => {
@@ -454,6 +481,7 @@ export default function App() {
     setPlayers(prev => prev.map(p => ({ ...p, hasGuessed: false })));
     setDrawerId(nextDrawerId);
     setCurrentWord('');
+    setFirstGuessTime(null); // Reset panic mode timer for the new round
     
     const options = await getUnusedWords(state.settings.wordCount);
     
@@ -483,39 +511,72 @@ export default function App() {
     const player = state.players.find(p => p.id === playerId);
     if (!player) return;
 
-    if (state.gameState === 'drawing' && playerId !== state.drawerId && !player.hasGuessed && text.trim().toLowerCase() === state.currentWord.toLowerCase()) {
+    const guessClean = text.trim().toLowerCase();
+    const wordClean = state.currentWord.toLowerCase();
+
+    if (state.gameState === 'drawing' && playerId !== state.drawerId && !player.hasGuessed) {
       
-      const allowedHints = state.settings.hints;
-      const maxPossibleHints = Math.floor(state.currentWord.length / 2);
-      const activeHints = Math.min(allowedHints, maxPossibleHints);
-      
-      const currentHintsRevealed = Math.floor((1 - (state.timeLeft / state.settings.drawTime)) * activeHints);
-      
-      let points = 300;
-      if (activeHints > 0) {
-        const penaltyPerHint = 300 / activeHints; 
-        points = Math.floor(300 - (currentHintsRevealed * penaltyPerHint));
-        points = Math.max(10, points); 
-      }
-      
-      setPlayers(prev => {
-        const updated = prev.map(p => {
-          if (p.id === playerId) return { ...p, score: p.score + points, hasGuessed: true };
-          if (p.id === state.drawerId) return { ...p, score: p.score + 50 }; 
-          return p;
+      // EXACT MATCH: "PIONEER & PANIC" SCORING
+      if (guessClean === wordClean) {
+        
+        const allowedHints = state.settings.hints;
+        const maxPossibleHints = Math.floor(state.currentWord.length / 2);
+        const activeHints = Math.min(allowedHints, maxPossibleHints);
+        
+        const currentHintsRevealed = Math.floor((1 - (state.timeLeft / state.settings.drawTime)) * activeHints);
+        const hintPenalty = currentHintsRevealed * 50;
+        
+        let points = 400 - hintPenalty;
+
+        if (state.firstGuessTime === null) {
+          setFirstGuessTime(state.timeLeft);
+        } else {
+          const timePassed = state.firstGuessTime - state.timeLeft;
+          const timePenalty = timePassed * 3;
+          points -= timePenalty;
+        }
+
+        points = Math.max(50, points);
+        
+        const drawerPoints = 35 + Math.floor(points * 0.10);
+        
+        setPlayers(prev => {
+          const updated = prev.map(p => {
+            if (p.id === playerId) return { ...p, score: p.score + points, hasGuessed: true };
+            if (p.id === state.drawerId) return { ...p, score: p.score + drawerPoints }; 
+            return p;
+          });
+
+          const stillActiveNonDrawers = updated.filter(p => p.id !== state.drawerId && p.connected !== false);
+          if (stillActiveNonDrawers.length > 0 && stillActiveNonDrawers.every(p => p.hasGuessed)) {
+             setTimeout(() => endTurn(true), 100); 
+          }
+          return updated;
         });
 
-        const activeNonDrawers = updated.filter(p => p.id !== state.drawerId && p.connected !== false);
-        if (activeNonDrawers.length > 0 && activeNonDrawers.every(p => p.hasGuessed)) {
-           setTimeout(() => endTurn(true), 100); 
-        }
-        return updated;
-      });
+        // ONLY log that the user guessed it (no point display)
+        const sysMsg = { sender: 'System', text: `${player.name} guessed it!`, system: true, variant: 'success' };
+        setChat(prev => [...prev, sysMsg]);
+        broadcast({ type: 'CHAT', payload: sysMsg });
+        return;
+      }
 
-      const sysMsg = { sender: 'System', text: `${player.name} guessed the word! (+${points}pts)`, system: true, variant: 'success' };
-      setChat(prev => [...prev, sysMsg]);
-      broadcast({ type: 'CHAT', payload: sysMsg });
-      return;
+      // CLOSE GUESS (TYPO) LOGIC
+      if (wordClean.length > 2) {
+         const distance = getLevenshteinDistance(guessClean, wordClean);
+         if (distance <= 2) {
+            const sysMsg = { sender: 'System', text: `'${text}' is close!`, system: true, variant: 'warning' };
+            
+            if (playerId === myPlayerId) {
+               setChat(prev => [...prev, sysMsg]);
+            } else {
+               const targetPlayer = state.players.find(p => p.id === playerId);
+               const targetConn = connsRef.current.find(c => c.peer === targetPlayer.peerId);
+               if (targetConn && targetConn.open) targetConn.send({ type: 'CHAT', payload: sysMsg });
+            }
+            return; 
+         }
+      }
     }
 
     const isHidden = (state.gameState === 'drawing' && player.hasGuessed);
@@ -528,11 +589,11 @@ export default function App() {
     const state = stateRef.current;
     setGameState('turn_end'); 
     
-    let endText = `Time's up! The word was ${state.currentWord}`;
+    // Log just the word at turn's end
+    let endText = `The word was ${state.currentWord}`;
     if (forcedSkip) endText = "Drawer disconnected. Turn skipped!";
-    else if (allGuessed) endText = `Everyone guessed it! The word was ${state.currentWord}`;
     
-    const sysMsg = { sender: 'System', text: endText, system: true, variant: forcedSkip ? 'error' : (allGuessed ? 'success' : 'default') };
+    const sysMsg = { sender: 'System', text: endText, system: true, variant: forcedSkip ? 'error' : 'default' };
     setChat(prev => [...prev, sysMsg]);
     broadcast({ type: 'CHAT', payload: sysMsg });
 
@@ -562,7 +623,10 @@ export default function App() {
       if (isNewRound) {
         if (latestState.currentRound < latestState.settings.rounds) {
           setCurrentRound(prev => prev + 1);
-          startTurn(nextPlayer.id);
+          setGameState('round_start');
+          setTimeout(() => {
+            startTurn(nextPlayer.id);
+          }, 3000);
         } else {
           setGameState('game_over');
         }
@@ -596,13 +660,11 @@ export default function App() {
     }
   }, [gameState]);
 
-  // Convert Hex string to RGBA for pixel manipulation
   const hexToRgba = (hex) => {
     const bigint = parseInt(hex.startsWith('#') ? hex.slice(1) : hex, 16);
     return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255, 255];
   };
 
-  // Optimized Flood Fill algorithm
   const executeFillCommand = ({ x, y, color }) => {
     if (!canvasRef.current || !contextRef.current) return;
     const canvas = canvasRef.current;
@@ -692,7 +754,6 @@ export default function App() {
     if (myPlayerId !== drawerId) return;
     const { offsetX, offsetY } = e.nativeEvent;
 
-    // Trigger fill if paint bucket is active
     if (activeTool === 'fill') {
       executeFillCommand({ x: offsetX, y: offsetY, color: brushColor });
       const payload = { x: offsetX, y: offsetY, color: brushColor };
@@ -791,7 +852,7 @@ export default function App() {
           {podiumBlocks.map(p => (
             <div key={p.id} className="flex flex-col items-center">
               <div className={`w-12 h-12 md:w-16 md:h-16 rounded-full flex items-center justify-center text-2xl md:text-4xl mb-2 z-10 relative shadow-lg border-2 border-[#222831] ${p.connected === false ? 'grayscale opacity-50' : ''}`} style={{ backgroundColor: p.color }}>{p.face}</div>
-              <div className="font-bold text-[#EEEEEE] text-sm md:text-base truncate w-20 md:w-28 text-center">{p.name}</div>
+              <div className="font-bold text-[#EEEEEE] text-sm md:text-base truncate w-20 md:w-28 text-center">{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</div>
               <div className="text-[#00ADB5] font-black text-lg md:text-xl mb-1">{p.score}</div>
               <div className={`w-20 md:w-28 ${p.height} ${p.color} rounded-t-lg flex justify-center pt-2 md:pt-4 text-3xl md:text-5xl font-black text-[#222831]/40 shadow-inner`}>{p.rank}</div>
             </div>
@@ -803,7 +864,7 @@ export default function App() {
               <div key={p.id} className={`flex items-center gap-4 bg-[#393E46] border border-[#222831] px-6 py-3 rounded-xl w-full text-[#EEEEEE] ${p.connected === false ? 'opacity-50' : ''}`}>
                 <div className="text-xl font-black w-8 text-[#EEEEEE]/50">#{i + 4}</div>
                 <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl shrink-0 grayscale-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
-                <div className="text-lg font-bold flex-grow truncate">{p.name}</div>
+                <div className="text-lg font-bold flex-grow truncate">{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</div>
                 <div className="text-xl font-black text-[#00ADB5]">{p.score}</div>
               </div>
             ))}
@@ -815,6 +876,7 @@ export default function App() {
 
   const iAmDrawer = myPlayerId === drawerId;
   const myPlayerData = players.find(p => p.id === myPlayerId) || { hasGuessed: false };
+  const currentDrawerName = players.find(p => p.id === drawerId)?.name || 'Someone';
 
   // ==========================================
   // RENDER VIEWS
@@ -831,15 +893,20 @@ export default function App() {
             <ul className="space-y-4 text-sm">
               <li>
                 <strong className="text-[#EEEEEE] block text-base mb-1">🔄 What is a Round?</strong>
-                A round consists of <strong>every player taking one turn to draw</strong> while the others guess. The game ends when all rounds are completed.
+                A round consists of <strong>every player taking one turn to draw</strong> while the others guess.
               </li>
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🎯 Guessers (Hint Tiers)</strong>
-                You earn points based on how many letters were hidden when you guessed! Guessing before any letters are revealed gives you <strong>300 points</strong>. For every hint revealed, your potential score drops proportionally.
+                <strong className="text-[#EEEEEE] block text-base mb-1">🎯 Guessers (Pioneer & Panic)</strong>
+                The base score is <strong>400 points</strong>. For every hint revealed, the available score drops by <strong>50 points</strong>.<br/><br/>
+                The <em>first</em> person to guess gets the max available points. Once they guess, a <strong>Panic Timer</strong> starts, and the score drops by <strong>3 points every second</strong> for everyone else! (Minimum 50 points).
+              </li>
+              <li>
+                <strong className="text-[#EEEEEE] block text-base mb-1">🔍 Close Guesses (Typo Forgiveness)</strong>
+                If your guess is off by just 1 or 2 letters, the system will secretly tell you that you are close without revealing your typo to the lobby!
               </li>
               <li>
                 <strong className="text-[#EEEEEE] block text-base mb-1">🖌️ The Drawer</strong>
-                You earn a bonus <strong>+50 points</strong> for <em>each</em> player who successfully guesses your drawing.
+                The drawer earns a flat <strong>35 points</strong> plus <strong>10%</strong> of the guesser's points every time someone gets the word right.
               </li>
             </ul>
             <button onClick={() => setShowInfoModal(false)} className="mt-8 w-full bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold py-3 rounded-lg transition-colors cursor-pointer shadow">Got it!</button>
@@ -1002,7 +1069,7 @@ export default function App() {
         </div>
       )}
 
-      {(gameState === 'word_select' || gameState === 'drawing' || gameState === 'turn_end' || gameState === 'game_over') && (
+      {(gameState === 'word_select' || gameState === 'drawing' || gameState === 'turn_end' || gameState === 'game_over' || gameState === 'round_start') && (
         <div className="flex-grow flex flex-col lg:flex-row max-w-[1400px] mx-auto w-full p-4 gap-4">
           
           {/* Left Panel: Players */}
@@ -1012,7 +1079,7 @@ export default function App() {
                 <div className="font-black text-[#EEEEEE]/50 w-4 text-center">#{idx + 1}</div>
                 <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg shrink-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
                 <div className="flex flex-col overflow-hidden">
-                  <span className={`font-bold text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</span>
+                  <span className={`font-bold text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name || "Unknown Player"} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</span>
                   <span className={`text-xs ${p.id === drawerId ? 'text-[#00ADB5]' : 'text-[#EEEEEE]/70'}`}>{p.score} pts</span>
                 </div>
               </div>
@@ -1028,6 +1095,12 @@ export default function App() {
             <div className="flex-grow relative bg-[#EEEEEE] cursor-crosshair h-[400px] lg:h-auto">
               <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none bg-[#EEEEEE]" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} />
 
+              {gameState === 'round_start' && (
+                <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex flex-col items-center justify-center z-30 text-center">
+                  <h2 className="text-6xl md:text-8xl font-black mb-2 text-[#00ADB5] animate-pulse drop-shadow-lg">Round {currentRound} !!</h2>
+                </div>
+              )}
+
               {gameState === 'word_select' && (
                 <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex items-center justify-center z-20">
                   {iAmDrawer ? (
@@ -1040,15 +1113,15 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="text-center text-[#EEEEEE]/70"><div className="text-5xl mb-4 animate-bounce">🤔</div><h2 className="text-2xl font-bold">The Drawer is choosing a word...</h2></div>
+                    <div className="text-center text-[#EEEEEE]/70"><div className="text-5xl mb-4 animate-bounce">🤔</div><h2 className="text-2xl font-bold">{currentDrawerName} is choosing a word...</h2></div>
                   )}
                 </div>
               )}
 
               {gameState === 'turn_end' && (
                 <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex flex-col items-center justify-center z-20 text-center">
-                  <h2 className="text-4xl font-black mb-2 text-[#EEEEEE]">Turn Over!</h2>
-                  <p className="text-2xl text-[#00ADB5] mb-4 font-bold">{chat[chat.length-1]?.text || 'Loading next turn...'}</p>
+                  <h2 className="text-3xl font-bold mb-2 text-[#EEEEEE]/80">The word was</h2>
+                  <p className="text-5xl md:text-6xl text-[#00ADB5] mb-4 font-black uppercase tracking-widest">{currentWord || '...'}</p>
                 </div>
               )}
 
