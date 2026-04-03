@@ -6,7 +6,7 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v25'; 
+const SESSION_KEY = 'skribbl_p2p_session_v26'; 
 
 // --- Emergency Fallback List ---
 const FALLBACK_WORDS = ["apple", "elephant", "guitar", "sunflower", "mountain", "ocean", "bicycle", "pizza", "computer", "dragon", "castle", "wizard"];
@@ -554,7 +554,7 @@ export default function App() {
           return updated;
         });
 
-        // ONLY log that the user guessed it (no point display)
+        // Log clean message (no points shown in chat)
         const sysMsg = { sender: 'System', text: `${player.name} guessed it!`, system: true, variant: 'success' };
         setChat(prev => [...prev, sysMsg]);
         broadcast({ type: 'CHAT', payload: sysMsg });
@@ -637,32 +637,70 @@ export default function App() {
   };
 
   // ==========================================
-  // 5. CANVAS & FLOOD FILL LOGIC
+  // 5. CANVAS & FLOOD FILL LOGIC (RESPONSIVE)
   // ==========================================
   useEffect(() => {
-    if (gameState === 'drawing' && canvasRef.current) {
-      const canvas = canvasRef.current;
-      canvas.width = canvas.offsetWidth;
-      canvas.height = canvas.offsetHeight;
-      const context = canvas.getContext("2d");
-      context.lineCap = "round";
-      context.lineJoin = "round";
-      
-      context.fillStyle = '#EEEEEE';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      contextRef.current = context;
+    const setupCanvas = () => {
+      if (gameState === 'drawing' && canvasRef.current) {
+        const canvas = canvasRef.current;
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width || canvas.offsetWidth;
+        tempCanvas.height = canvas.height || canvas.offsetHeight;
+        
+        // Save old content if resizing
+        if (canvas.width > 0 && canvas.height > 0 && savedCanvas) {
+           tempCanvas.getContext('2d').drawImage(canvas, 0, 0, tempCanvas.width, tempCanvas.height);
+        }
 
-      if (savedCanvas) {
-        const img = new Image();
-        img.src = savedCanvas;
-        img.onload = () => context.drawImage(img, 0, 0);
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
+        
+        const context = canvas.getContext("2d");
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        
+        context.fillStyle = '#EEEEEE';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        
+        if (savedCanvas) {
+          const img = new Image();
+          img.src = savedCanvas;
+          img.onload = () => context.drawImage(img, 0, 0, canvas.width, canvas.height);
+        }
+        contextRef.current = context;
       }
-    }
-  }, [gameState]);
+    };
+
+    setupCanvas();
+    
+    // Allow canvas to cleanly rescale when phone is rotated
+    window.addEventListener('resize', setupCanvas);
+    return () => window.removeEventListener('resize', setupCanvas);
+  }, [gameState, savedCanvas]);
 
   const hexToRgba = (hex) => {
     const bigint = parseInt(hex.startsWith('#') ? hex.slice(1) : hex, 16);
     return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255, 255];
+  };
+
+  // Normalizes coordinates (0.0 to 1.0) so drawings perfectly scale across mobile and desktop
+  const getPointerPos = (e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
+    
+    let clientX = e.clientX;
+    let clientY = e.clientY;
+
+    if (e.touches && e.touches.length > 0) {
+      clientX = e.touches[0].clientX;
+      clientY = e.touches[0].clientY;
+    }
+
+    return {
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height
+    };
   };
 
   const executeFillCommand = ({ x, y, color }) => {
@@ -675,8 +713,8 @@ export default function App() {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
     
-    const startX = Math.floor(x);
-    const startY = Math.floor(y);
+    const startX = Math.floor(x * width);
+    const startY = Math.floor(y * height);
     const startPos = (startY * width + startX) * 4;
     
     const startR = data[startPos];
@@ -752,11 +790,11 @@ export default function App() {
 
   const startDrawing = (e) => {
     if (myPlayerId !== drawerId) return;
-    const { offsetX, offsetY } = e.nativeEvent;
+    const { x, y } = getPointerPos(e);
 
     if (activeTool === 'fill') {
-      executeFillCommand({ x: offsetX, y: offsetY, color: brushColor });
-      const payload = { x: offsetX, y: offsetY, color: brushColor };
+      executeFillCommand({ x, y, color: brushColor });
+      const payload = { x, y, color: brushColor };
       if (isHost) broadcast({ type: 'FILL', payload });
       else sendToHost({ type: 'FILL', payload });
 
@@ -764,23 +802,22 @@ export default function App() {
       return;
     }
 
-    contextRef.current.beginPath();
-    contextRef.current.moveTo(offsetX, offsetY);
+    executeDrawCommand({ x, y, color: brushColor, size: brushSize, isNewStroke: true });
     setIsDrawing(true);
   };
 
   const draw = (e) => {
     if (!isDrawing || myPlayerId !== drawerId || activeTool !== 'brush') return;
-    const { offsetX, offsetY } = e.nativeEvent;
-    executeDrawCommand({ x: offsetX, y: offsetY, color: brushColor, size: brushSize, isNewStroke: false });
-    const payload = { x: offsetX, y: offsetY, color: brushColor, size: brushSize, isNewStroke: false };
+    const { x, y } = getPointerPos(e);
+    executeDrawCommand({ x, y, color: brushColor, size: brushSize, isNewStroke: false });
+    const payload = { x, y, color: brushColor, size: brushSize, isNewStroke: false };
     if (isHost) broadcast({ type: 'DRAW', payload });
     else sendToHost({ type: 'DRAW', payload });
   };
 
   const stopDrawing = () => {
     if (myPlayerId !== drawerId || activeTool !== 'brush') return;
-    contextRef.current.closePath();
+    if (!isDrawing) return;
     setIsDrawing(false);
     
     if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
@@ -791,16 +828,23 @@ export default function App() {
   };
 
   const executeDrawCommand = ({ x, y, color, size, isNewStroke }) => {
-    if (!contextRef.current) return;
+    if (!contextRef.current || !canvasRef.current) return;
+    const ctx = contextRef.current;
+    const canvas = canvasRef.current;
+    
+    const actualX = x * canvas.width;
+    const actualY = y * canvas.height;
+
     if (isNewStroke) {
-      contextRef.current.closePath();
-      contextRef.current.beginPath();
+      ctx.closePath();
+      ctx.beginPath();
+      ctx.moveTo(actualX, actualY);
       return;
     }
-    contextRef.current.strokeStyle = color;
-    contextRef.current.lineWidth = size;
-    contextRef.current.lineTo(x, y);
-    contextRef.current.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = size;
+    ctx.lineTo(actualX, actualY);
+    ctx.stroke();
   };
 
   const reqClearCanvas = () => {
@@ -861,11 +905,11 @@ export default function App() {
         {others.length > 0 && (
           <div className="mt-8 flex flex-col gap-2 w-full max-w-md">
             {others.map((p, i) => (
-              <div key={p.id} className={`flex items-center gap-4 bg-[#393E46] border border-[#222831] px-6 py-3 rounded-xl w-full text-[#EEEEEE] ${p.connected === false ? 'opacity-50' : ''}`}>
-                <div className="text-xl font-black w-8 text-[#EEEEEE]/50">#{i + 4}</div>
-                <div className="w-10 h-10 rounded-full flex items-center justify-center text-xl shrink-0 grayscale-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
-                <div className="text-lg font-bold flex-grow truncate">{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</div>
-                <div className="text-xl font-black text-[#00ADB5]">{p.score}</div>
+              <div key={p.id} className={`flex items-center gap-4 bg-[#393E46] border border-[#222831] px-4 md:px-6 py-2 md:py-3 rounded-xl w-full text-[#EEEEEE] ${p.connected === false ? 'opacity-50' : ''}`}>
+                <div className="text-lg md:text-xl font-black w-6 md:w-8 text-[#EEEEEE]/50">#{i + 4}</div>
+                <div className="w-8 h-8 md:w-10 md:h-10 rounded-full flex items-center justify-center text-lg md:text-xl shrink-0 grayscale-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
+                <div className="text-base md:text-lg font-bold flex-grow truncate">{p.name} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</div>
+                <div className="text-lg md:text-xl font-black text-[#00ADB5]">{p.score}</div>
               </div>
             ))}
           </div>
@@ -882,7 +926,7 @@ export default function App() {
   // RENDER VIEWS
   // ==========================================
   return (
-    <div className="min-h-screen bg-[#222831] flex flex-col font-sans text-[#EEEEEE] relative">
+    <div className="min-h-[100dvh] bg-[#222831] flex flex-col font-sans text-[#EEEEEE] overflow-x-hidden relative">
       
       {/* INFO SCORING MODAL */}
       {showInfoModal && (
@@ -890,22 +934,22 @@ export default function App() {
           <div className="bg-[#393E46] border border-[#00ADB5]/50 p-6 rounded-xl max-w-md w-full shadow-2xl relative text-[#EEEEEE]">
             <button onClick={() => setShowInfoModal(false)} className="absolute top-4 right-4 text-[#EEEEEE]/50 hover:text-[#EEEEEE] font-bold text-xl cursor-pointer">✖</button>
             <h2 className="text-2xl font-black mb-6 text-[#00ADB5] border-b border-[#222831] pb-2">How to Play & Scoring</h2>
-            <ul className="space-y-4 text-sm">
+            <ul className="space-y-4 text-sm md:text-base">
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🔄 What is a Round?</strong>
+                <strong className="text-[#EEEEEE] block text-base md:text-lg mb-1">🔄 What is a Round?</strong>
                 A round consists of <strong>every player taking one turn to draw</strong> while the others guess.
               </li>
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🎯 Guessers (Pioneer & Panic)</strong>
+                <strong className="text-[#EEEEEE] block text-base md:text-lg mb-1">🎯 Guessers (Pioneer & Panic)</strong>
                 The base score is <strong>400 points</strong>. For every hint revealed, the available score drops by <strong>50 points</strong>.<br/><br/>
                 The <em>first</em> person to guess gets the max available points. Once they guess, a <strong>Panic Timer</strong> starts, and the score drops by <strong>3 points every second</strong> for everyone else! (Minimum 50 points).
               </li>
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🔍 Close Guesses (Typo Forgiveness)</strong>
+                <strong className="text-[#EEEEEE] block text-base md:text-lg mb-1">🔍 Close Guesses (Typo Forgiveness)</strong>
                 If your guess is off by just 1 or 2 letters, the system will secretly tell you that you are close without revealing your typo to the lobby!
               </li>
               <li>
-                <strong className="text-[#EEEEEE] block text-base mb-1">🖌️ The Drawer</strong>
+                <strong className="text-[#EEEEEE] block text-base md:text-lg mb-1">🖌️ The Drawer</strong>
                 The drawer earns a flat <strong>35 points</strong> plus <strong>10%</strong> of the guesser's points every time someone gets the word right.
               </li>
             </ul>
@@ -915,11 +959,11 @@ export default function App() {
       )}
 
       {/* HEADER */}
-      <header className="bg-[#393E46] p-3 shadow-sm border-b border-[#222831] flex flex-wrap justify-between items-center z-10 gap-2">
-        <h1 className="text-2xl font-black tracking-tight text-[#EEEEEE]">Pictionary<span className="text-[#00ADB5]">.io</span></h1>
+      <header className="bg-[#393E46] p-2 md:p-3 shadow-sm border-b border-[#222831] flex flex-wrap justify-between items-center z-10 gap-2">
+        <h1 className="text-xl md:text-2xl font-black tracking-tight text-[#EEEEEE]">Pictionary<span className="text-[#00ADB5]">.io</span></h1>
         
         {gameState !== 'menu' ? (
-          <div className="flex flex-wrap items-center gap-4 text-sm font-bold">
+          <div className="flex flex-wrap items-center gap-2 md:gap-4 text-xs md:text-sm font-bold">
             <div className="hidden md:flex items-center gap-2 bg-[#222831] px-3 py-1.5 rounded-lg border border-[#00ADB5]/30">
               <span className="text-[#EEEEEE]/80">Room Code: <span className="font-mono text-[#EEEEEE]">{roomHostId === myPlayerId ? myPeerId : joinId}</span></span>
               <button onClick={() => copyToClipboard('code')} className="text-xs bg-[#393E46] hover:bg-[#222831] text-[#00ADB5] border border-[#00ADB5]/50 px-2 py-1 rounded transition-colors cursor-pointer">
@@ -930,27 +974,27 @@ export default function App() {
               </button>
             </div>
             
-            <div className="text-[#EEEEEE]/80 bg-[#222831] px-3 py-1.5 rounded-lg">Round {currentRound} / {settings.rounds}</div>
+            <div className="text-[#EEEEEE]/80 bg-[#222831] px-2 md:px-3 py-1 md:py-1.5 rounded-lg">Round {currentRound} / {settings.rounds}</div>
             
-            <div className={`text-lg bg-[#222831] px-3 py-1 rounded-lg ${timeLeft <= 10 ? 'text-red-400 animate-pulse bg-red-400/10' : 'text-[#EEEEEE]'}`}>
+            <div className={`text-base md:text-lg bg-[#222831] px-2 md:px-3 py-1 rounded-lg ${timeLeft <= 10 ? 'text-red-400 animate-pulse bg-red-400/10' : 'text-[#EEEEEE]'}`}>
               ⏱ {timeLeft}s
             </div>
 
-            <button onClick={() => setShowInfoModal(true)} className="bg-[#222831] hover:bg-[#1a1e25] text-[#00ADB5] border border-[#00ADB5]/50 w-8 h-8 rounded-full flex items-center justify-center font-bold transition-colors cursor-pointer shadow" title="Scoring Info">
+            <button onClick={() => setShowInfoModal(true)} className="bg-[#222831] hover:bg-[#1a1e25] text-[#00ADB5] border border-[#00ADB5]/50 w-7 h-7 md:w-8 md:h-8 rounded-full flex items-center justify-center font-bold transition-colors cursor-pointer shadow" title="Scoring Info">
               ?
             </button>
 
             {isHost ? (
-               <div className="flex gap-2">
-                 <button onClick={handleLeaveRoom} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#393E46] px-3 py-1.5 rounded-lg transition-colors cursor-pointer">
+               <div className="flex gap-1 md:gap-2">
+                 <button onClick={handleLeaveRoom} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#393E46] px-2 md:px-3 py-1 md:py-1.5 rounded-lg transition-colors cursor-pointer">
                    Leave
                  </button>
-                 <button onClick={closeRoomEntirely} className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-3 py-1.5 rounded-lg transition-colors cursor-pointer shadow-sm">
-                   Close Room
+                 <button onClick={closeRoomEntirely} className="bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/30 px-2 md:px-3 py-1 md:py-1.5 rounded-lg transition-colors cursor-pointer shadow-sm">
+                   Close
                  </button>
                </div>
             ) : (
-              <button onClick={handleLeaveRoom} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#393E46] px-3 py-1.5 rounded-lg transition-colors cursor-pointer">
+              <button onClick={handleLeaveRoom} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#393E46] px-2 md:px-3 py-1 md:py-1.5 rounded-lg transition-colors cursor-pointer">
                 Leave
               </button>
             )}
@@ -964,19 +1008,19 @@ export default function App() {
 
       {gameState === 'menu' && (
         <div className="flex-grow flex items-center justify-center p-4">
-          <div className="bg-[#393E46] p-8 rounded-2xl shadow-xl w-full max-w-sm border border-[#222831] text-center">
-            <div className="mb-6 relative w-32 h-32 mx-auto rounded-full border-4 shadow-inner flex items-center justify-center text-6xl border-[#222831]" style={{ backgroundColor: me.color }}>
+          <div className="bg-[#393E46] p-6 md:p-8 rounded-2xl shadow-xl w-full max-w-sm border border-[#222831] text-center">
+            <div className="mb-6 relative w-24 h-24 md:w-32 md:h-32 mx-auto rounded-full border-4 shadow-inner flex items-center justify-center text-5xl md:text-6xl border-[#222831]" style={{ backgroundColor: me.color }}>
               {me.face}
               <button onClick={randomizeAvatar} className="absolute -bottom-2 -right-2 bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] text-sm p-2 rounded-full shadow cursor-pointer">🎲</button>
             </div>
-            <input type="text" placeholder="Enter your name" className="w-full p-3 border-2 border-[#222831] bg-[#222831] text-[#EEEEEE] rounded-xl mb-6 focus:border-[#00ADB5] outline-none text-center font-bold text-lg placeholder-[#EEEEEE]/50" value={me.name} onChange={(e) => setMe({ ...me, name: e.target.value })} />
+            <input type="text" placeholder="Enter your name" className="w-full p-3 border-2 border-[#222831] bg-[#222831] text-[#EEEEEE] rounded-xl mb-6 focus:border-[#00ADB5] outline-none text-center font-bold text-base md:text-lg placeholder-[#EEEEEE]/50" value={me.name} onChange={(e) => setMe({ ...me, name: e.target.value })} />
             <div className="space-y-3">
-              <button onClick={hostGame} disabled={!myPeerId} className="w-full bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-black py-4 rounded-xl shadow-[0_4px_0_#007a80] active:shadow-none active:translate-y-1 transition-all text-lg cursor-pointer">
+              <button onClick={hostGame} disabled={!myPeerId} className="w-full bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-black py-4 rounded-xl shadow-[0_4px_0_#007a80] active:shadow-none active:translate-y-1 transition-all text-base md:text-lg cursor-pointer">
                 Create Private Room
               </button>
               <div className="flex gap-2 pt-2">
-                <input type="text" placeholder="Paste Code" className="flex-grow p-3 border-2 border-[#222831] bg-[#222831] text-[#EEEEEE] rounded-xl focus:border-[#00ADB5] outline-none text-center font-mono uppercase placeholder-[#EEEEEE]/50" value={joinId} onChange={(e) => setJoinId(e.target.value.toUpperCase())} />
-                <button onClick={joinGame} disabled={!joinId || !myPeerId} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#222831] font-bold px-6 rounded-xl shadow-[0_4px_0_#1a1e25] active:shadow-none active:translate-y-1 transition-all cursor-pointer">
+                <input type="text" placeholder="Paste Code" className="flex-grow p-3 border-2 border-[#222831] bg-[#222831] text-[#EEEEEE] rounded-xl focus:border-[#00ADB5] outline-none text-center font-mono uppercase text-base placeholder-[#EEEEEE]/50" value={joinId} onChange={(e) => setJoinId(e.target.value.toUpperCase())} />
+                <button onClick={joinGame} disabled={!joinId || !myPeerId} className="bg-[#222831] hover:bg-[#1a1e25] text-[#EEEEEE] border border-[#222831] font-bold px-4 md:px-6 rounded-xl shadow-[0_4px_0_#1a1e25] active:shadow-none active:translate-y-1 transition-all cursor-pointer text-sm md:text-base">
                   Join
                 </button>
               </div>
@@ -986,83 +1030,83 @@ export default function App() {
       )}
 
       {gameState === 'lobby' && (
-        <div className="flex-grow flex flex-col items-center justify-center p-4">
-          <div className="bg-[#393E46] p-8 rounded-2xl shadow-xl w-full max-w-4xl border border-[#222831] flex flex-col md:flex-row gap-8">
+        <div className="flex-grow flex flex-col items-center justify-center p-2 md:p-4">
+          <div className="bg-[#393E46] p-4 md:p-8 rounded-2xl shadow-xl w-full max-w-4xl border border-[#222831] flex flex-col md:flex-row gap-6 md:gap-8">
             <div className="flex-grow">
-              <h2 className="text-2xl font-black mb-4 flex justify-between items-center text-[#EEEEEE]">
-                Lobby <span className="text-sm font-normal bg-[#222831] px-3 py-1 rounded-full text-[#EEEEEE]/80">{players.filter(p=>p.connected!==false).length} / {settings.maxPlayers} Players</span>
+              <h2 className="text-xl md:text-2xl font-black mb-4 flex justify-between items-center text-[#EEEEEE]">
+                Lobby <span className="text-xs md:text-sm font-normal bg-[#222831] px-3 py-1 rounded-full text-[#EEEEEE]/80">{players.filter(p=>p.connected!==false).length} / {settings.maxPlayers} Players</span>
               </h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 md:gap-4">
                 {players.map(p => (
                   <div key={p.id} className={`flex flex-col items-center p-3 rounded-xl border ${p.connected === false ? 'bg-[#393E46] border-[#222831] opacity-50 grayscale' : 'bg-[#222831] border-[#222831]'}`}>
-                    <div className="w-16 h-16 rounded-full flex items-center justify-center text-3xl shadow-sm mb-2 border border-[#393E46]" style={{ backgroundColor: p.color }}>{p.face}</div>
-                    <span className="font-bold text-sm w-full text-center truncate text-[#EEEEEE]">
+                    <div className="w-12 h-12 md:w-16 md:h-16 rounded-full flex items-center justify-center text-2xl md:text-3xl shadow-sm mb-2 border border-[#393E46]" style={{ backgroundColor: p.color }}>{p.face}</div>
+                    <span className="font-bold text-xs md:text-sm w-full text-center truncate text-[#EEEEEE]">
                       {p.name || "Unknown Player"} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}
                     </span>
-                    {p.connected === false && <span className="text-xs font-bold text-red-400 mt-1">Disconnected</span>}
+                    {p.connected === false && <span className="text-[10px] md:text-xs font-bold text-red-400 mt-1">Disconnected</span>}
                   </div>
                 ))}
               </div>
             </div>
 
             {isHost ? (
-              <div className="w-full md:w-80 bg-[#222831] p-6 rounded-xl border border-[#222831]">
-                <h3 className="font-bold mb-4 text-[#EEEEEE] uppercase tracking-wide text-sm">Room Settings</h3>
+              <div className="w-full md:w-80 bg-[#222831] p-4 md:p-6 rounded-xl border border-[#222831]">
+                <h3 className="font-bold mb-4 text-[#EEEEEE] uppercase tracking-wide text-xs md:text-sm">Room Settings</h3>
                 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Max Players: {settings.maxPlayers}</label>
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Max Players: {settings.maxPlayers}</label>
                 <input type="range" min="2" max="12" value={settings.maxPlayers} onChange={e => setSettings({...settings, maxPlayers: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Rounds: {settings.rounds}</label>
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Rounds: {settings.rounds}</label>
                 <input type="range" min="1" max="10" value={settings.rounds} onChange={e => setSettings({...settings, rounds: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Draw Time: {settings.drawTime}s</label>
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Draw Time: {settings.drawTime}s</label>
                 <input type="range" min="30" max="180" step="10" value={settings.drawTime} onChange={e => setSettings({...settings, drawTime: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Word Choices: {settings.wordCount}</label>
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Word Choices: {settings.wordCount}</label>
                 <input type="range" min="2" max="5" value={settings.wordCount} onChange={e => setSettings({...settings, wordCount: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Hints Allowed: {settings.hints}</label>
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Hints Allowed: {settings.hints}</label>
                 <input type="range" min="0" max="5" value={settings.hints} onChange={e => setSettings({...settings, hints: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Custom Words</label>
-                <textarea rows="2" className="w-full p-2 border border-[#393E46] bg-[#393E46] text-[#EEEEEE] rounded-lg mb-2 text-sm outline-none focus:border-[#00ADB5] placeholder-[#EEEEEE]/40" value={settings.customWords} onChange={e => setSettings({...settings, customWords: e.target.value})} placeholder="dog, cat, laser..." />
+                <label className="block text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-1">Custom Words</label>
+                <textarea rows="2" className="w-full p-2 border border-[#393E46] bg-[#393E46] text-[#EEEEEE] rounded-lg mb-2 text-base md:text-sm outline-none focus:border-[#00ADB5] placeholder-[#EEEEEE]/40" value={settings.customWords} onChange={e => setSettings({...settings, customWords: e.target.value})} placeholder="dog, cat, laser..." />
                 
-                <label className="flex items-center gap-2 text-sm font-bold text-[#EEEEEE]/80 mb-6 cursor-pointer">
+                <label className="flex items-center gap-2 text-xs md:text-sm font-bold text-[#EEEEEE]/80 mb-6 cursor-pointer">
                   <input type="checkbox" checked={settings.useOnlyCustom} onChange={e => setSettings({...settings, useOnlyCustom: e.target.checked})} className="w-4 h-4 accent-[#00ADB5]" /> Use custom words exclusively
                 </label>
                 
-                <div className="p-4 bg-[#393E46] border border-[#222831] rounded-lg mb-4 text-center">
+                <div className="p-3 md:p-4 bg-[#393E46] border border-[#222831] rounded-lg mb-4 text-center">
                   <span className="text-xs text-[#00ADB5] block mb-1 font-bold">INVITE CODE</span>
-                  <strong className="text-3xl tracking-widest font-mono text-[#EEEEEE] block mb-3">{myPeerId}</strong>
+                  <strong className="text-2xl md:text-3xl tracking-widest font-mono text-[#EEEEEE] block mb-3">{myPeerId}</strong>
                   <div className="flex gap-2 justify-center">
-                    <button onClick={() => copyToClipboard('code')} className="flex-1 bg-[#222831] hover:bg-[#1a1e25] text-[#00ADB5] font-bold py-2 rounded text-sm transition-colors cursor-pointer border border-[#00ADB5]/30">
+                    <button onClick={() => copyToClipboard('code')} className="flex-1 bg-[#222831] hover:bg-[#1a1e25] text-[#00ADB5] font-bold py-2 rounded text-xs md:text-sm transition-colors cursor-pointer border border-[#00ADB5]/30">
                       {copiedType === 'code' ? 'Copied!' : 'Copy Code'}
                     </button>
-                    <button onClick={() => copyToClipboard('link')} className="flex-1 bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold py-2 rounded text-sm transition-colors cursor-pointer">
+                    <button onClick={() => copyToClipboard('link')} className="flex-1 bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold py-2 rounded text-xs md:text-sm transition-colors cursor-pointer">
                       {copiedType === 'link' ? 'Copied Link!' : 'Copy Link'}
                     </button>
                   </div>
                 </div>
 
                 <div className="flex gap-2 mb-4">
-                  <button onClick={handleLeaveRoom} className="flex-1 bg-[#393E46] hover:bg-[#222831] text-[#EEEEEE] font-bold py-2 rounded-xl transition-colors cursor-pointer">Leave</button>
-                  <button onClick={closeRoomEntirely} className="flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold py-2 rounded-xl transition-colors cursor-pointer">Close Room</button>
+                  <button onClick={handleLeaveRoom} className="flex-1 bg-[#393E46] hover:bg-[#222831] text-[#EEEEEE] font-bold py-2 rounded-xl transition-colors cursor-pointer text-sm">Leave</button>
+                  <button onClick={closeRoomEntirely} className="flex-1 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-bold py-2 rounded-xl transition-colors cursor-pointer text-sm">Close Room</button>
                 </div>
 
                 <button 
                   onClick={startGame} 
                   disabled={players.filter(p=>p.connected!==false).length < 2 || players.filter(p=>p.connected!==false).length > settings.maxPlayers}
-                  className={`w-full font-black py-3 rounded-xl transition-all ${players.filter(p=>p.connected!==false).length < 2 || players.filter(p=>p.connected!==false).length > settings.maxPlayers ? 'bg-[#393E46] text-[#EEEEEE]/50 cursor-not-allowed' : 'bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] shadow-[0_4px_0_#007a80] active:translate-y-1 cursor-pointer'}`}
+                  className={`w-full font-black py-3 rounded-xl transition-all text-sm md:text-base ${players.filter(p=>p.connected!==false).length < 2 || players.filter(p=>p.connected!==false).length > settings.maxPlayers ? 'bg-[#393E46] text-[#EEEEEE]/50 cursor-not-allowed' : 'bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] shadow-[0_4px_0_#007a80] active:translate-y-1 cursor-pointer'}`}
                 >
                   {players.filter(p=>p.connected!==false).length < 2 ? 'Need 2+ Online' : players.filter(p=>p.connected!==false).length > settings.maxPlayers ? 'Room Over Capacity' : 'Start Game'}
                 </button>
               </div>
             ) : (
-              <div className="w-full md:w-80 flex flex-col items-center justify-center text-[#EEEEEE]/50 p-8 text-center bg-[#222831] rounded-xl border border-[#222831]">
-                <div className="text-4xl mb-4 animate-spin text-[#00ADB5]">⏳</div>
-                <p className="font-bold text-lg text-[#EEEEEE]">Waiting for Host...</p>
-                <p className="text-sm mb-4">Status: {networkStatus}</p>
-                <button onClick={handleLeaveRoom} className="bg-red-500/10 text-red-400 px-4 py-2 rounded font-bold hover:bg-red-500/20 transition-colors cursor-pointer">Leave Lobby</button>
+              <div className="w-full md:w-80 flex flex-col items-center justify-center text-[#EEEEEE]/50 p-6 md:p-8 text-center bg-[#222831] rounded-xl border border-[#222831]">
+                <div className="text-3xl md:text-4xl mb-4 animate-spin text-[#00ADB5]">⏳</div>
+                <p className="font-bold text-base md:text-lg text-[#EEEEEE]">Waiting for Host...</p>
+                <p className="text-xs md:text-sm mb-4">Status: {networkStatus}</p>
+                <button onClick={handleLeaveRoom} className="bg-red-500/10 text-red-400 px-4 py-2 rounded font-bold hover:bg-red-500/20 transition-colors cursor-pointer text-sm">Leave Lobby</button>
               </div>
             )}
           </div>
@@ -1070,17 +1114,17 @@ export default function App() {
       )}
 
       {(gameState === 'word_select' || gameState === 'drawing' || gameState === 'turn_end' || gameState === 'game_over' || gameState === 'round_start') && (
-        <div className="flex-grow flex flex-col lg:flex-row max-w-[1400px] mx-auto w-full p-4 gap-4">
+        <div className="flex-grow flex flex-col lg:flex-row max-w-[1400px] mx-auto w-full p-2 md:p-4 gap-2 md:gap-4">
           
           {/* Left Panel: Players */}
-          <div className="w-full lg:w-48 flex flex-row lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto order-2 lg:order-1 shrink-0">
+          <div className="w-full lg:w-48 flex flex-row lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto order-2 lg:order-1 shrink-0 snap-x pb-1 md:pb-0">
             {[...players].sort((a,b) => b.score - a.score).map((p, idx) => (
-              <div key={p.id} className={`flex items-center gap-3 p-2 rounded-lg border-2 min-w-[160px] ${p.connected === false ? 'opacity-50 grayscale bg-[#393E46] border-[#222831]' : p.id === drawerId ? 'bg-[#222831] border-[#00ADB5]' : p.hasGuessed ? 'bg-[#00ADB5]/20 border-[#00ADB5]/50' : 'bg-[#393E46] border-[#222831]'}`}>
-                <div className="font-black text-[#EEEEEE]/50 w-4 text-center">#{idx + 1}</div>
-                <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg shrink-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
+              <div key={p.id} className={`flex items-center gap-2 md:gap-3 p-1.5 md:p-2 rounded-lg border-2 min-w-[130px] md:min-w-[160px] snap-center ${p.connected === false ? 'opacity-50 grayscale bg-[#393E46] border-[#222831]' : p.id === drawerId ? 'bg-[#222831] border-[#00ADB5]' : p.hasGuessed ? 'bg-[#00ADB5]/20 border-[#00ADB5]/50' : 'bg-[#393E46] border-[#222831]'}`}>
+                <div className="font-black text-[#EEEEEE]/50 w-3 md:w-4 text-center text-xs md:text-base">#{idx + 1}</div>
+                <div className="w-8 h-8 md:w-10 md:h-10 rounded-full flex items-center justify-center text-base md:text-lg shrink-0 border border-[#222831]" style={{ backgroundColor: p.color }}>{p.face}</div>
                 <div className="flex flex-col overflow-hidden">
-                  <span className={`font-bold text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name || "Unknown Player"} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</span>
-                  <span className={`text-xs ${p.id === drawerId ? 'text-[#00ADB5]' : 'text-[#EEEEEE]/70'}`}>{p.score} pts</span>
+                  <span className={`font-bold text-xs md:text-sm truncate text-[#EEEEEE] ${p.connected === false ? 'line-through text-red-400' : ''}`}>{p.name || "Unknown Player"} {p.id === myPlayerId ? <span className="text-[#00ADB5]">(You)</span> : ''}</span>
+                  <span className={`text-[10px] md:text-xs ${p.id === drawerId ? 'text-[#00ADB5]' : 'text-[#EEEEEE]/70'}`}>{p.score} pts</span>
                 </div>
               </div>
             ))}
@@ -1088,58 +1132,65 @@ export default function App() {
 
           {/* Center Panel: Canvas */}
           <div className="flex-grow flex flex-col min-w-0 bg-[#393E46] rounded-xl shadow-sm border border-[#222831] order-1 lg:order-2 overflow-hidden relative">
-            <div className="bg-[#222831] border-b border-[#222831] p-3 text-center">
-              <div className={`font-mono font-bold tracking-[0.5em] text-2xl uppercase ${gameState === 'turn_end' ? 'text-[#00ADB5]' : 'text-[#EEEEEE]'}`}>{renderHint()}</div>
+            <div className="bg-[#222831] border-b border-[#222831] p-2 md:p-3 text-center">
+              <div className={`font-mono font-bold tracking-[0.3em] md:tracking-[0.5em] text-xl md:text-2xl uppercase ${gameState === 'turn_end' ? 'text-[#00ADB5]' : 'text-[#EEEEEE]'}`}>{renderHint()}</div>
             </div>
 
-            <div className="flex-grow relative bg-[#EEEEEE] cursor-crosshair h-[400px] lg:h-auto">
-              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full touch-none bg-[#EEEEEE]" onMouseDown={startDrawing} onMouseMove={draw} onMouseUp={stopDrawing} onMouseLeave={stopDrawing} />
+            <div className="flex-grow relative bg-[#EEEEEE] cursor-crosshair h-[350px] sm:h-[450px] lg:h-auto w-full touch-none">
+              <canvas 
+                ref={canvasRef} 
+                className="absolute inset-0 w-full h-full touch-none bg-[#EEEEEE]" 
+                onPointerDown={startDrawing} 
+                onPointerMove={draw} 
+                onPointerUp={stopDrawing} 
+                onPointerOut={stopDrawing} 
+              />
 
               {gameState === 'round_start' && (
                 <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex flex-col items-center justify-center z-30 text-center">
-                  <h2 className="text-6xl md:text-8xl font-black mb-2 text-[#00ADB5] animate-pulse drop-shadow-lg">Round {currentRound} !!</h2>
+                  <h2 className="text-5xl md:text-8xl font-black mb-2 text-[#00ADB5] animate-pulse drop-shadow-lg">Round {currentRound} !!</h2>
                 </div>
               )}
 
               {gameState === 'word_select' && (
-                <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex items-center justify-center z-20">
+                <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex items-center justify-center z-20 p-4">
                   {iAmDrawer ? (
-                    <div className="text-center">
-                      <h2 className="text-3xl font-black mb-6 text-[#EEEEEE]">Choose a word</h2>
-                      <div className="flex gap-4 justify-center">
+                    <div className="text-center w-full">
+                      <h2 className="text-2xl md:text-3xl font-black mb-4 md:mb-6 text-[#EEEEEE]">Choose a word</h2>
+                      <div className="flex flex-wrap gap-3 md:gap-4 justify-center">
                         {wordOptions.map(w => (
-                          <button key={w} onClick={() => { if(isHost) hostWordChosen(w); else sendToHost({ type: 'WORD_CHOSEN', payload: w }); }} className="bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold text-xl py-4 px-8 rounded-xl shadow-[0_4px_0_#007a80] active:translate-y-1 transition-all uppercase cursor-pointer">{w}</button>
+                          <button key={w} onClick={() => { if(isHost) hostWordChosen(w); else sendToHost({ type: 'WORD_CHOSEN', payload: w }); }} className="bg-[#00ADB5] hover:bg-[#00939b] text-[#EEEEEE] font-bold text-sm md:text-xl py-3 md:py-4 px-4 md:px-8 rounded-xl shadow-[0_4px_0_#007a80] active:translate-y-1 transition-all uppercase cursor-pointer">{w}</button>
                         ))}
                       </div>
                     </div>
                   ) : (
-                    <div className="text-center text-[#EEEEEE]/70"><div className="text-5xl mb-4 animate-bounce">🤔</div><h2 className="text-2xl font-bold">{currentDrawerName} is choosing a word...</h2></div>
+                    <div className="text-center text-[#EEEEEE]/70"><div className="text-4xl md:text-5xl mb-4 animate-bounce">🤔</div><h2 className="text-xl md:text-2xl font-bold">{currentDrawerName} is choosing a word...</h2></div>
                   )}
                 </div>
               )}
 
               {gameState === 'turn_end' && (
-                <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex flex-col items-center justify-center z-20 text-center">
-                  <h2 className="text-3xl font-bold mb-2 text-[#EEEEEE]/80">The word was</h2>
-                  <p className="text-5xl md:text-6xl text-[#00ADB5] mb-4 font-black uppercase tracking-widest">{currentWord || '...'}</p>
+                <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-sm flex flex-col items-center justify-center z-20 text-center p-4">
+                  <h2 className="text-2xl md:text-3xl font-bold mb-2 text-[#EEEEEE]/80">The word was</h2>
+                  <p className="text-3xl sm:text-5xl md:text-6xl text-[#00ADB5] mb-4 font-black uppercase tracking-widest break-all">{currentWord || '...'}</p>
                 </div>
               )}
 
               {gameState === 'game_over' && (
                 <div className="absolute inset-0 bg-[#222831]/95 backdrop-blur-md flex flex-col items-center justify-center z-30 overflow-y-auto py-8">
-                  <h1 className="text-5xl md:text-6xl font-black mb-2 text-[#00ADB5] drop-shadow-lg">Game Over!</h1>
-                  <p className="text-[#EEEEEE]/80 font-medium mb-4">Final Standings</p>
+                  <h1 className="text-4xl md:text-6xl font-black mb-2 text-[#00ADB5] drop-shadow-lg">Game Over!</h1>
+                  <p className="text-sm md:text-base text-[#EEEEEE]/80 font-medium mb-4">Final Standings</p>
                   
                   {renderPodium()}
 
-                  <div className="mt-12 flex gap-4">
+                  <div className="mt-8 md:mt-12 flex flex-wrap justify-center gap-3 md:gap-4 px-4">
                     {isHost ? (
                       <>
-                        <button onClick={handleLeaveRoom} className="bg-[#393E46] hover:bg-[#1a1e25] px-8 py-4 rounded-xl font-bold text-[#EEEEEE] border border-[#222831] shadow-lg active:scale-95 transition-all cursor-pointer">Leave</button>
-                        <button onClick={closeRoomEntirely} className="bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 px-8 py-4 rounded-xl font-bold shadow-lg active:scale-95 transition-all cursor-pointer">Close Room</button>
+                        <button onClick={handleLeaveRoom} className="bg-[#393E46] hover:bg-[#1a1e25] px-6 md:px-8 py-3 md:py-4 rounded-xl font-bold text-[#EEEEEE] border border-[#222831] shadow-lg active:scale-95 transition-all cursor-pointer text-sm md:text-base">Leave</button>
+                        <button onClick={closeRoomEntirely} className="bg-red-500/20 hover:bg-red-500/30 text-red-400 border border-red-500/30 px-6 md:px-8 py-3 md:py-4 rounded-xl font-bold shadow-lg active:scale-95 transition-all cursor-pointer text-sm md:text-base">Close Room</button>
                       </>
                     ) : (
-                      <button onClick={handleLeaveRoom} className="bg-[#393E46] hover:bg-[#1a1e25] px-8 py-4 rounded-xl font-bold text-[#EEEEEE] border border-[#222831] shadow-lg active:scale-95 transition-all cursor-pointer">Leave Room</button>
+                      <button onClick={handleLeaveRoom} className="bg-[#393E46] hover:bg-[#1a1e25] px-6 md:px-8 py-3 md:py-4 rounded-xl font-bold text-[#EEEEEE] border border-[#222831] shadow-lg active:scale-95 transition-all cursor-pointer text-sm md:text-base">Leave Room</button>
                     )}
                   </div>
                 </div>
@@ -1147,30 +1198,35 @@ export default function App() {
             </div>
 
             {iAmDrawer && gameState === 'drawing' && (
-              <div className="bg-[#222831] border-t border-[#222831] p-2 flex gap-4 justify-center items-center">
+              <div className="bg-[#222831] border-t border-[#222831] p-2 flex flex-wrap gap-2 md:gap-4 justify-center items-center">
                 
                 {/* TOOL SELECTOR: Brush vs Fill */}
-                <div className="flex gap-2 bg-[#393E46] p-1 rounded-lg border border-[#222831]">
-                  <button onClick={() => setActiveTool('brush')} className={`px-2 py-1 rounded text-xl transition-colors cursor-pointer ${activeTool === 'brush' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Brush">🖌️</button>
-                  <button onClick={() => setActiveTool('fill')} className={`px-2 py-1 rounded text-xl transition-colors cursor-pointer ${activeTool === 'fill' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Fill">🪣</button>
+                <div className="flex gap-1 md:gap-2 bg-[#393E46] p-1 rounded-lg border border-[#222831]">
+                  <button onClick={() => setActiveTool('brush')} className={`px-2 py-1 rounded text-lg md:text-xl transition-colors cursor-pointer ${activeTool === 'brush' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Brush">🖌️</button>
+                  <button onClick={() => setActiveTool('fill')} className={`px-2 py-1 rounded text-lg md:text-xl transition-colors cursor-pointer ${activeTool === 'fill' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Fill">🪣</button>
                 </div>
-                <div className="w-px h-8 bg-[#393E46]"></div>
+                
+                <div className="w-px h-6 md:h-8 bg-[#393E46] hidden sm:block"></div>
 
-                <div className="flex flex-wrap gap-2 justify-center max-w-[200px] md:max-w-none">
-                  {COLORS.map(c => <button key={c} onClick={() => setBrushColor(c)} className={`w-8 h-8 rounded-full border-2 shadow-sm cursor-pointer ${brushColor === c ? 'border-[#00ADB5] scale-110' : 'border-[#393E46]'}`} style={{ backgroundColor: c }} />)}
+                <div className="flex flex-wrap gap-1.5 md:gap-2 justify-center max-w-[150px] sm:max-w-none">
+                  {COLORS.map(c => <button key={c} onClick={() => setBrushColor(c)} className={`w-6 h-6 md:w-8 md:h-8 rounded-full border-2 shadow-sm cursor-pointer ${brushColor === c ? 'border-[#00ADB5] scale-110' : 'border-[#393E46]'}`} style={{ backgroundColor: c }} />)}
                 </div>
-                <div className="w-px h-8 bg-[#393E46]"></div>
-                <input type="range" min="2" max="40" value={brushSize} onChange={e => setBrushSize(e.target.value)} className="w-24 accent-[#00ADB5] cursor-pointer" />
-                <div className="w-px h-8 bg-[#393E46]"></div>
-                <button onClick={reqClearCanvas} className="bg-[#393E46] hover:bg-[#1a1e25] text-[#EEEEEE] font-bold p-2 rounded-lg cursor-pointer border border-[#222831]" title="Trash / Clear">🗑️</button>
+                
+                <div className="w-px h-6 md:h-8 bg-[#393E46] hidden sm:block"></div>
+                
+                <input type="range" min="2" max="40" value={brushSize} onChange={e => setBrushSize(e.target.value)} className="w-16 md:w-24 accent-[#00ADB5] cursor-pointer" />
+                
+                <div className="w-px h-6 md:h-8 bg-[#393E46] hidden sm:block"></div>
+                
+                <button onClick={reqClearCanvas} className="bg-[#393E46] hover:bg-[#1a1e25] text-[#EEEEEE] font-bold p-1.5 md:p-2 rounded-lg cursor-pointer border border-[#222831] text-sm md:text-base" title="Trash / Clear">🗑️</button>
               </div>
             )}
           </div>
 
           {/* Right Panel: Chat */}
-          <div className="w-full lg:w-72 flex flex-col bg-[#393E46] rounded-xl shadow-sm border border-[#222831] h-64 lg:h-auto order-3 shrink-0 overflow-hidden">
-            <div className="bg-[#222831] p-3 border-b border-[#222831] font-bold text-[#EEEEEE]">Chat & Guesses</div>
-            <div className="flex-grow overflow-y-auto p-3 flex flex-col gap-1.5 text-sm">
+          <div className="w-full lg:w-72 flex flex-col bg-[#393E46] rounded-xl shadow-sm border border-[#222831] h-48 md:h-64 lg:h-auto order-3 shrink-0 overflow-hidden">
+            <div className="bg-[#222831] p-2 md:p-3 border-b border-[#222831] font-bold text-[#EEEEEE] text-sm md:text-base">Chat & Guesses</div>
+            <div className="flex-grow overflow-y-auto p-2 md:p-3 flex flex-col gap-1.5 text-xs md:text-sm">
               {chat.map((msg, i) => {
                 if (msg.system) {
                   let bgColor = 'bg-[#00ADB5]/10';
@@ -1178,14 +1234,14 @@ export default function App() {
                   if (msg.variant === 'success') { bgColor = 'bg-emerald-400/10'; textColor = 'text-emerald-400'; }
                   if (msg.variant === 'error') { bgColor = 'bg-red-400/10'; textColor = 'text-red-400'; }
                   if (msg.variant === 'warning') { bgColor = 'bg-amber-400/10'; textColor = 'text-amber-400'; }
-                  return <div key={i} className={`${textColor} font-bold text-center ${bgColor} py-1.5 rounded my-1 shadow-sm`}>{msg.text}</div>;
+                  return <div key={i} className={`${textColor} font-bold text-center ${bgColor} py-1 md:py-1.5 px-2 rounded my-0.5 md:my-1 shadow-sm`}>{msg.text}</div>;
                 }
                 
                 if (msg.isHidden && !myPlayerData.hasGuessed && !iAmDrawer) return <div key={i} className="text-[#EEEEEE]/50 italic">🔒 <span className="font-bold">{msg.sender}</span> is chatting with winners...</div>;
                 
                 return (
-                  <div key={i} className={`flex flex-col ${msg.isHidden ? 'bg-[#00ADB5]/20 p-1.5 rounded border border-[#00ADB5]/30' : ''}`}>
-                    <span className="font-bold text-xs text-[#EEEEEE]/60">{msg.sender}</span>
+                  <div key={i} className={`flex flex-col ${msg.isHidden ? 'bg-[#00ADB5]/20 p-1 md:p-1.5 rounded border border-[#00ADB5]/30' : ''}`}>
+                    <span className="font-bold text-[10px] md:text-xs text-[#EEEEEE]/60">{msg.sender}</span>
                     <span className="text-[#EEEEEE] font-medium break-words">{msg.text}</span>
                   </div>
                 );
@@ -1197,8 +1253,8 @@ export default function App() {
               if(isHost) handleChat(guessInput, myPlayerId);
               else sendToHost({ type: 'CHAT_MESSAGE', payload: { text: guessInput, playerId: myPlayerId } });
               setGuessInput('');
-            }} className="p-2 bg-[#222831] border-t border-[#222831] flex gap-2">
-              <input type="text" placeholder={iAmDrawer ? "You cannot guess!" : myPlayerData.hasGuessed ? "Chat with winners..." : "Type your guess..."} disabled={iAmDrawer || myPlayerData.connected === false} className="flex-grow p-2 border border-[#393E46] bg-[#393E46] rounded outline-none focus:border-[#00ADB5] disabled:opacity-50 text-sm text-[#EEEEEE] placeholder-[#EEEEEE]/50" value={guessInput} onChange={e => setGuessInput(e.target.value)} />
+            }} className="p-1.5 md:p-2 bg-[#222831] border-t border-[#222831] flex gap-2">
+              <input type="text" placeholder={iAmDrawer ? "You cannot guess!" : myPlayerData.hasGuessed ? "Chat with winners..." : "Type your guess..."} disabled={iAmDrawer || myPlayerData.connected === false} className="flex-grow p-2 border border-[#393E46] bg-[#393E46] rounded outline-none focus:border-[#00ADB5] disabled:opacity-50 text-base text-[#EEEEEE] placeholder-[#EEEEEE]/50" value={guessInput} onChange={e => setGuessInput(e.target.value)} />
             </form>
           </div>
         </div>
