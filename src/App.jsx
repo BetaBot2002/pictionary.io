@@ -6,7 +6,7 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v16';
+const SESSION_KEY = 'skribbl_p2p_session_v19';
 
 // --- Emergency Fallback List ---
 const FALLBACK_WORDS = ["apple", "elephant", "guitar", "sunflower", "mountain", "ocean", "bicycle", "pizza", "computer", "dragon", "castle", "wizard"];
@@ -69,6 +69,7 @@ export default function App() {
   const canvasRef = useRef(null);
   const contextRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [activeTool, setActiveTool] = useState('brush'); // 'brush' or 'fill'
   const [brushColor, setBrushColor] = useState('#000000');
   const [brushSize, setBrushSize] = useState(5);
 
@@ -271,7 +272,7 @@ export default function App() {
     if (isHost && gameState !== 'menu') {
       broadcast({
         type: 'SYNC_STATE',
-        payload: { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, roomHostId }
+        payload: { gameState, players, currentRound, drawerId, currentWord, timeLeft, settings, savedCanvas, chat, roomHostId }
       });
     }
   }, [gameState, players, currentRound, drawerId, currentWord, timeLeft, isHost, roomHostId, settings]);
@@ -325,6 +326,7 @@ export default function App() {
         setTimeLeft(data.payload.timeLeft);
         setSettings(data.payload.settings);
         setRoomHostId(data.payload.roomHostId);
+        setChat(data.payload.chat);
         applyCanvasState(data.payload.savedCanvas);
         break;
       case 'WORD_OPTIONS': setWordOptions(data.payload); break;
@@ -332,6 +334,10 @@ export default function App() {
       case 'DRAW': 
         executeDrawCommand(data.payload); 
         if (data.payload.isNewStroke && canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
+        break;
+      case 'FILL':
+        executeFillCommand(data.payload);
+        if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         break;
       case 'CLEAR_CANVAS': executeClear(); break;
       case 'ROOM_FULL':
@@ -378,6 +384,11 @@ export default function App() {
         executeDrawCommand(data.payload);
         if (data.payload.isNewStroke && canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
         broadcast({ type: 'DRAW', payload: data.payload }, conn.peer); 
+        break;
+      case 'FILL':
+        executeFillCommand(data.payload);
+        if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
+        broadcast({ type: 'FILL', payload: data.payload }, conn.peer);
         break;
       case 'CLEAR_CANVAS':
         executeClear();
@@ -519,7 +530,7 @@ export default function App() {
     
     let endText = `Time's up! The word was ${state.currentWord}`;
     if (forcedSkip) endText = "Drawer disconnected. Turn skipped!";
-    else if (allGuessed) endText = `The word was ${state.currentWord}`;
+    else if (allGuessed) endText = `Everyone guessed it! The word was ${state.currentWord}`;
     
     const sysMsg = { sender: 'System', text: endText, system: true, variant: forcedSkip ? 'error' : (allGuessed ? 'success' : 'default') };
     setChat(prev => [...prev, sysMsg]);
@@ -562,7 +573,7 @@ export default function App() {
   };
 
   // ==========================================
-  // 5. CANVAS LOGIC
+  // 5. CANVAS & FLOOD FILL LOGIC
   // ==========================================
   useEffect(() => {
     if (gameState === 'drawing' && canvasRef.current) {
@@ -585,16 +596,120 @@ export default function App() {
     }
   }, [gameState]);
 
+  // Convert Hex string to RGBA for pixel manipulation
+  const hexToRgba = (hex) => {
+    const bigint = parseInt(hex.startsWith('#') ? hex.slice(1) : hex, 16);
+    return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255, 255];
+  };
+
+  // Optimized Flood Fill algorithm
+  const executeFillCommand = ({ x, y, color }) => {
+    if (!canvasRef.current || !contextRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = contextRef.current;
+    
+    const width = canvas.width;
+    const height = canvas.height;
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+    
+    const startX = Math.floor(x);
+    const startY = Math.floor(y);
+    const startPos = (startY * width + startX) * 4;
+    
+    const startR = data[startPos];
+    const startG = data[startPos + 1];
+    const startB = data[startPos + 2];
+    const startA = data[startPos + 3];
+    
+    const fillRgba = hexToRgba(color);
+    
+    const tolerance = 50; 
+    const colorMatch = (pos) => {
+      return Math.abs(data[pos] - startR) <= tolerance &&
+             Math.abs(data[pos + 1] - startG) <= tolerance &&
+             Math.abs(data[pos + 2] - startB) <= tolerance &&
+             Math.abs(data[pos + 3] - startA) <= tolerance;
+    };
+
+    if (Math.abs(startR - fillRgba[0]) <= tolerance &&
+        Math.abs(startG - fillRgba[1]) <= tolerance &&
+        Math.abs(startB - fillRgba[2]) <= tolerance) {
+      return; 
+    }
+
+    const pixelStack = [[startX, startY]];
+    
+    while (pixelStack.length) {
+      const newPos = pixelStack.pop();
+      const px = newPos[0];
+      let py = newPos[1];
+      
+      let pixelPos = (py * width + px) * 4;
+      while (py-- >= 0 && colorMatch(pixelPos)) {
+        pixelPos -= width * 4;
+      }
+      pixelPos += width * 4;
+      ++py;
+      
+      let reachLeft = false;
+      let reachRight = false;
+      
+      while (py++ < height - 1 && colorMatch(pixelPos)) {
+        data[pixelPos] = fillRgba[0];
+        data[pixelPos + 1] = fillRgba[1];
+        data[pixelPos + 2] = fillRgba[2];
+        data[pixelPos + 3] = 255; 
+        
+        if (px > 0) {
+          if (colorMatch(pixelPos - 4)) {
+            if (!reachLeft) {
+              pixelStack.push([px - 1, py]);
+              reachLeft = true;
+            }
+          } else if (reachLeft) {
+            reachLeft = false;
+          }
+        }
+        
+        if (px < width - 1) {
+          if (colorMatch(pixelPos + 4)) {
+            if (!reachRight) {
+              pixelStack.push([px + 1, py]);
+              reachRight = true;
+            }
+          } else if (reachRight) {
+            reachRight = false;
+          }
+        }
+        pixelPos += width * 4;
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+  };
+
   const startDrawing = (e) => {
     if (myPlayerId !== drawerId) return;
     const { offsetX, offsetY } = e.nativeEvent;
+
+    // Trigger fill if paint bucket is active
+    if (activeTool === 'fill') {
+      executeFillCommand({ x: offsetX, y: offsetY, color: brushColor });
+      const payload = { x: offsetX, y: offsetY, color: brushColor };
+      if (isHost) broadcast({ type: 'FILL', payload });
+      else sendToHost({ type: 'FILL', payload });
+
+      if (canvasRef.current) setSavedCanvas(canvasRef.current.toDataURL());
+      return;
+    }
+
     contextRef.current.beginPath();
     contextRef.current.moveTo(offsetX, offsetY);
     setIsDrawing(true);
   };
 
   const draw = (e) => {
-    if (!isDrawing || myPlayerId !== drawerId) return;
+    if (!isDrawing || myPlayerId !== drawerId || activeTool !== 'brush') return;
     const { offsetX, offsetY } = e.nativeEvent;
     executeDrawCommand({ x: offsetX, y: offsetY, color: brushColor, size: brushSize, isNewStroke: false });
     const payload = { x: offsetX, y: offsetY, color: brushColor, size: brushSize, isNewStroke: false };
@@ -603,7 +718,7 @@ export default function App() {
   };
 
   const stopDrawing = () => {
-    if (myPlayerId !== drawerId) return;
+    if (myPlayerId !== drawerId || activeTool !== 'brush') return;
     contextRef.current.closePath();
     setIsDrawing(false);
     
@@ -836,7 +951,7 @@ export default function App() {
                 <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Draw Time: {settings.drawTime}s</label>
                 <input type="range" min="30" max="180" step="10" value={settings.drawTime} onChange={e => setSettings({...settings, drawTime: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
-                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Word Count Options: {settings.wordCount}</label>
+                <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Word Choices: {settings.wordCount}</label>
                 <input type="range" min="2" max="5" value={settings.wordCount} onChange={e => setSettings({...settings, wordCount: Number(e.target.value)})} className="w-full mb-4 accent-[#00ADB5] cursor-pointer" />
 
                 <label className="block text-sm font-bold text-[#EEEEEE]/80 mb-1">Hints Allowed: {settings.hints}</label>
@@ -960,6 +1075,14 @@ export default function App() {
 
             {iAmDrawer && gameState === 'drawing' && (
               <div className="bg-[#222831] border-t border-[#222831] p-2 flex gap-4 justify-center items-center">
+                
+                {/* TOOL SELECTOR: Brush vs Fill */}
+                <div className="flex gap-2 bg-[#393E46] p-1 rounded-lg border border-[#222831]">
+                  <button onClick={() => setActiveTool('brush')} className={`px-2 py-1 rounded text-xl transition-colors cursor-pointer ${activeTool === 'brush' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Brush">🖌️</button>
+                  <button onClick={() => setActiveTool('fill')} className={`px-2 py-1 rounded text-xl transition-colors cursor-pointer ${activeTool === 'fill' ? 'bg-[#00ADB5] text-[#EEEEEE]' : 'text-[#EEEEEE]/50 hover:bg-[#222831]'}`} title="Fill">🪣</button>
+                </div>
+                <div className="w-px h-8 bg-[#393E46]"></div>
+
                 <div className="flex flex-wrap gap-2 justify-center max-w-[200px] md:max-w-none">
                   {COLORS.map(c => <button key={c} onClick={() => setBrushColor(c)} className={`w-8 h-8 rounded-full border-2 shadow-sm cursor-pointer ${brushColor === c ? 'border-[#00ADB5] scale-110' : 'border-[#393E46]'}`} style={{ backgroundColor: c }} />)}
                 </div>
