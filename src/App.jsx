@@ -6,7 +6,11 @@ const generateShortId = () => Math.random().toString(36).substring(2, 8).toUpper
 const COLORS = ['#000000', '#EF4444', '#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899', '#EEEEEE'];
 const FACES = ['😀', '😎', '🤪', '🥸', '🤖', '👽', '👻', '🤡'];
 const RANDOM_NAMES = ["Bus Driver", "Pet Food", "Soggy Noodle", "Space Cowboy", "Night Owl"];
-const SESSION_KEY = 'skribbl_p2p_session_v26'; 
+const SESSION_KEY = 'skribbl_p2p_session_v25'; 
+
+// --- Fixed Internal Canvas Resolution ---
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 600;
 
 // --- Emergency Fallback List ---
 const FALLBACK_WORDS = ["apple", "elephant", "guitar", "sunflower", "mountain", "ocean", "bicycle", "pizza", "computer", "dragon", "castle", "wizard"];
@@ -328,8 +332,8 @@ export default function App() {
       img.src = base64String;
       img.onload = () => {
         canvasRef.current.getContext('2d').fillStyle = '#EEEEEE';
-        canvasRef.current.getContext('2d').fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-        canvasRef.current.getContext('2d').drawImage(img, 0, 0);
+        canvasRef.current.getContext('2d').fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        canvasRef.current.getContext('2d').drawImage(img, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
       };
       setSavedCanvas(base64String);
     }
@@ -554,7 +558,7 @@ export default function App() {
           return updated;
         });
 
-        // Log clean message (no points shown in chat)
+        // ONLY log that the user guessed it (no point display)
         const sysMsg = { sender: 'System', text: `${player.name} guessed it!`, system: true, variant: 'success' };
         setChat(prev => [...prev, sysMsg]);
         broadcast({ type: 'CHAT', payload: sysMsg });
@@ -637,45 +641,35 @@ export default function App() {
   };
 
   // ==========================================
-  // 5. CANVAS & FLOOD FILL LOGIC (RESPONSIVE)
+  // 5. CANVAS & FLOOD FILL LOGIC (FIXED RES)
   // ==========================================
   useEffect(() => {
     const setupCanvas = () => {
       if (gameState === 'drawing' && canvasRef.current) {
         const canvas = canvasRef.current;
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = canvas.width || canvas.offsetWidth;
-        tempCanvas.height = canvas.height || canvas.offsetHeight;
-        
-        // Save old content if resizing
-        if (canvas.width > 0 && canvas.height > 0 && savedCanvas) {
-           tempCanvas.getContext('2d').drawImage(canvas, 0, 0, tempCanvas.width, tempCanvas.height);
-        }
-
-        canvas.width = canvas.offsetWidth;
-        canvas.height = canvas.offsetHeight;
+        // Lock internal resolution unconditionally
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
         
         const context = canvas.getContext("2d");
         context.lineCap = "round";
         context.lineJoin = "round";
         
         context.fillStyle = '#EEEEEE';
-        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
         
         if (savedCanvas) {
           const img = new Image();
           img.src = savedCanvas;
-          img.onload = () => context.drawImage(img, 0, 0, canvas.width, canvas.height);
+          img.onload = () => context.drawImage(img, 0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
         }
         contextRef.current = context;
       }
     };
 
     setupCanvas();
-    
-    // Allow canvas to cleanly rescale when phone is rotated
-    window.addEventListener('resize', setupCanvas);
-    return () => window.removeEventListener('resize', setupCanvas);
+    // We no longer need to redraw on window resize because the internal resolution is fixed!
+    // CSS handles the visual resizing natively.
   }, [gameState, savedCanvas]);
 
   const hexToRgba = (hex) => {
@@ -683,7 +677,7 @@ export default function App() {
     return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255, 255];
   };
 
-  // Normalizes coordinates (0.0 to 1.0) so drawings perfectly scale across mobile and desktop
+  // Maps physical screen pixels back to the 800x600 internal resolution grid
   const getPointerPos = (e) => {
     const canvas = canvasRef.current;
     if (!canvas) return { x: 0, y: 0 };
@@ -697,9 +691,12 @@ export default function App() {
       clientY = e.touches[0].clientY;
     }
 
+    const scaleX = CANVAS_WIDTH / rect.width;
+    const scaleY = CANVAS_HEIGHT / rect.height;
+
     return {
-      x: (clientX - rect.left) / rect.width,
-      y: (clientY - rect.top) / rect.height
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY
     };
   };
 
@@ -708,13 +705,13 @@ export default function App() {
     const canvas = canvasRef.current;
     const ctx = contextRef.current;
     
-    const width = canvas.width;
-    const height = canvas.height;
+    const width = CANVAS_WIDTH;
+    const height = CANVAS_HEIGHT;
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
     
-    const startX = Math.floor(x * width);
-    const startY = Math.floor(y * height);
+    const startX = Math.floor(x);
+    const startY = Math.floor(y);
     const startPos = (startY * width + startX) * 4;
     
     const startR = data[startPos];
@@ -830,20 +827,16 @@ export default function App() {
   const executeDrawCommand = ({ x, y, color, size, isNewStroke }) => {
     if (!contextRef.current || !canvasRef.current) return;
     const ctx = contextRef.current;
-    const canvas = canvasRef.current;
-    
-    const actualX = x * canvas.width;
-    const actualY = y * canvas.height;
 
     if (isNewStroke) {
       ctx.closePath();
       ctx.beginPath();
-      ctx.moveTo(actualX, actualY);
+      ctx.moveTo(x, y);
       return;
     }
     ctx.strokeStyle = color;
     ctx.lineWidth = size;
-    ctx.lineTo(actualX, actualY);
+    ctx.lineTo(x, y);
     ctx.stroke();
   };
 
@@ -1114,7 +1107,7 @@ export default function App() {
       )}
 
       {(gameState === 'word_select' || gameState === 'drawing' || gameState === 'turn_end' || gameState === 'game_over' || gameState === 'round_start') && (
-        <div className="flex-grow flex flex-col lg:flex-row max-w-[1400px] mx-auto w-full p-2 md:p-4 gap-2 md:gap-4">
+        <div className="flex-grow flex flex-col lg:flex-row max-w-[1400px] mx-auto w-full p-2 md:p-4 gap-2 md:gap-4 overflow-hidden">
           
           {/* Left Panel: Players */}
           <div className="w-full lg:w-48 flex flex-row lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto order-2 lg:order-1 shrink-0 snap-x pb-1 md:pb-0">
@@ -1132,14 +1125,16 @@ export default function App() {
 
           {/* Center Panel: Canvas */}
           <div className="flex-grow flex flex-col min-w-0 bg-[#393E46] rounded-xl shadow-sm border border-[#222831] order-1 lg:order-2 overflow-hidden relative">
-            <div className="bg-[#222831] border-b border-[#222831] p-2 md:p-3 text-center">
+            <div className="bg-[#222831] border-b border-[#222831] p-2 md:p-3 text-center z-10 relative">
               <div className={`font-mono font-bold tracking-[0.3em] md:tracking-[0.5em] text-xl md:text-2xl uppercase ${gameState === 'turn_end' ? 'text-[#00ADB5]' : 'text-[#EEEEEE]'}`}>{renderHint()}</div>
             </div>
 
-            <div className="flex-grow relative bg-[#EEEEEE] cursor-crosshair h-[350px] sm:h-[450px] lg:h-auto w-full touch-none">
+            <div className="flex-grow relative bg-[#EEEEEE] w-full flex items-center justify-center overflow-hidden touch-none">
+              
+              {/* FIXED ASPECT RATIO CANVAS CONTAINER */}
               <canvas 
                 ref={canvasRef} 
-                className="absolute inset-0 w-full h-full touch-none bg-[#EEEEEE]" 
+                className="w-full h-auto max-w-[800px] aspect-[4/3] bg-[#EEEEEE] touch-none shadow-md border-b md:border-b-0 border-[#222831]/20" 
                 onPointerDown={startDrawing} 
                 onPointerMove={draw} 
                 onPointerUp={stopDrawing} 
@@ -1198,7 +1193,7 @@ export default function App() {
             </div>
 
             {iAmDrawer && gameState === 'drawing' && (
-              <div className="bg-[#222831] border-t border-[#222831] p-2 flex flex-wrap gap-2 md:gap-4 justify-center items-center">
+              <div className="bg-[#222831] p-2 flex flex-wrap gap-2 md:gap-4 justify-center items-center relative z-10 shadow-[0_-2px_10px_rgba(0,0,0,0.1)]">
                 
                 {/* TOOL SELECTOR: Brush vs Fill */}
                 <div className="flex gap-1 md:gap-2 bg-[#393E46] p-1 rounded-lg border border-[#222831]">
